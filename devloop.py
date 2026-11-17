@@ -77,16 +77,16 @@ class Project:
             except BlockingIOError: raise Blocked('Another iteration is running')
             yield
 
-    def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False):
+    def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False, untrusted=False):
         env = os.environ.copy()
-        if agent:
-            # No GitHub or job-application credentials in the agent subprocess environment.
-            for key in list(env):
-                if key.startswith(('GH_', 'GITHUB_', 'AWS_', 'GOOGLE_', 'AZURE_', 'XAI_')) or key in ('SSH_AUTH_SOCK','GIT_ASKPASS'):
-                    env.pop(key, None)
-            env['GIT_TERMINAL_PROMPT'] = '0'
-        else:
-            env['GIT_TERMINAL_PROMPT'] = '0'
+        if agent or untrusted:
+            # Deny unknown variables too: providers and custom credentials vary.
+            allowed = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL',
+                       'LC_CTYPE', 'TMPDIR', 'TERM'}
+            if agent:
+                allowed.add('CODEX_HOME')
+            env = {key: value for key, value in env.items() if key in allowed}
+        env['GIT_TERMINAL_PROMPT'] = '0'
         with self.log.open('a', encoding='utf-8') as log:
             log.write(f'[{stamp()}] {argv[0]} {argv[1] if len(argv)>1 else ""}\n'); log.flush()
             proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
@@ -175,7 +175,7 @@ class Project:
                     raise Blocked('Changed symlink or submodule requires manual review')
             before_test = self.git('write-tree')
             self.record('testing','Running configured test command',sha=head)
-            self.invoke(self.cfg['test_command'],self.repo,timeout=self.cfg['test_timeout_seconds'],capture=False)
+            self.invoke(self.cfg['test_command'],self.repo,timeout=self.cfg['test_timeout_seconds'],capture=False,untrusted=True)
             self.git('add','-A')
             if before_test != self.git('write-tree'): raise Blocked('Tests modified tracked or unignored files; review required')
             if STOP or self.pause.exists(): raise Blocked('Paused before publication')

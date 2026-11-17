@@ -23,6 +23,10 @@ add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME
 The Jobstein example uses 120 seconds between iterations and polls exact-commit CI every 60 seconds. CI wait is bounded. Local tests must pass before publication. Dirty, divergent or unpublished work is preserved for review. Only non-force pushes are supported.
 
 ## Safety and limitations
+Agent and configured build/test subprocesses receive only PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TMPDIR and TERM from the runner, plus GIT_TERMINAL_PROMPT=0. Agents also receive CODEX_HOME for user-controlled Codex setup. Unknown environment variables, publication tokens, SSH agent sockets, Git configuration overrides and runtime injection variables are excluded. Build commands needing additional configuration must use a reviewed, user-controlled setup; environment inheritance is deliberately restricted. Runner-side Git/GitHub operations retain their environment for publication.
+
+This filtering covers inherited environment variables only. HOME, CODEX_HOME, PATH executables, temporary directories and repository files can still expose credentials or execute code; Git credential helpers and configuration on disk remain accessible. It does not isolate processes from the runner's user account, filesystem or network. Use a separate account/container with restricted mounts and credentials before running untrusted code.
+
 This is an initial prototype, not a complete security boundary. Environment variable filtering and path allowlists do not prevent all credential exposure or malicious generated code; the local build command executes code. Keep auto_push disabled. Use isolated credentials and filesystem, never real applicant data. No live Codex or WSL service test has been completed. The installer does not start the service. The uninstall script only disables the named service and preserves state.
 
 Run offline tests: `python3 -m unittest discover -s tests -v`. See AGENTS.md and BACKLOG.md for continuation.

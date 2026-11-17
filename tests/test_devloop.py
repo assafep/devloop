@@ -1,3 +1,5 @@
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -7,6 +9,34 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import devloop as d
 
 class Tests(unittest.TestCase):
+    def test_subprocess_environment(self):
+        # Real offline child process, with synthetic credentials only.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = d.Project.__new__(d.Project)
+            p.log = Path(tmp) / 'activity.log'
+            env = {'PATH': os.defpath, 'HOME': tmp, 'LANG': 'C',
+                   'CODEX_HOME': tmp, 'GH_TOKEN': 'synthetic',
+                   'GITHUB_TOKEN': 'synthetic', 'CUSTOM_PUBLICATION_SECRET': 'synthetic',
+                   'SSH_AUTH_SOCK': '/synthetic/socket', 'GIT_ASKPASS': 'synthetic',
+                   'PYTHONPATH': '/synthetic', 'LD_PRELOAD': '',
+                   'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'alias.test',
+                   'GIT_CONFIG_VALUE_0': 'synthetic'}
+            command = [sys.executable, '-c',
+                       'import json, os; print(json.dumps(dict(os.environ)))']
+            with patch.dict(os.environ, env, clear=True):
+                for options in ({'agent': True}, {'untrusted': True}):
+                    with self.subTest(options=options):
+                        child = json.loads(p.invoke(command, **options))
+                        for key in env.keys() - {'PATH', 'HOME', 'LANG', 'CODEX_HOME'}:
+                            self.assertNotIn(key, child)
+                        self.assertEqual(child['HOME'], tmp)
+                        self.assertEqual(child['PATH'], os.defpath)
+                        self.assertEqual(child['GIT_TERMINAL_PROMPT'], '0')
+                        self.assertEqual(child.get('CODEX_HOME'),
+                                         tmp if options.get('agent') else None)
+                trusted = json.loads(p.invoke(command))
+                self.assertEqual(trusted['GH_TOKEN'], 'synthetic')
+
     def test_exact_ci(self):
         self.assertEqual(d.classify_ci([], 'a'), ('not-found', None))
         runs=[dict(headSha='b',event='push',status='completed',conclusion='success',databaseId=1)]
