@@ -1,0 +1,17 @@
+[Unit]
+Description=DevLoop development agent for %i
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/devloop run %i
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

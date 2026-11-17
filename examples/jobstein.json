@@ -1,0 +1,23 @@
+{
+  "repository": "assafep/assaf-jobstein",
+  "branch": "main",
+  "workflow": "CI",
+  "interval_seconds": 120,
+  "ci_poll_seconds": 60,
+  "ci_timeout_seconds": 1800,
+  "agent_timeout_seconds": 1200,
+  "test_timeout_seconds": 900,
+  "auto_push": false,
+  "test_command": [
+    "./gradlew",
+    "--no-daemon",
+    "test",
+    "installDist"
+  ],
+  "allowed_paths": [
+    "src/",
+    "docs/",
+    "README.md"
+  ],
+  "instructions": "Continue Jobstein within its agreed administrative CLI scope. Prioritize provisioning consistency, native credential storage safety, offline validation and distribution readiness. No actual job application automation. Do not use real CVs, credentials or personal information. Do not create unnecessary commits after scope completion."
+}
