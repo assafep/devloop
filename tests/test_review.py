@@ -146,3 +146,57 @@ class ReviewTests(unittest.TestCase):
                         self.project.validate_staged_tree(self.base, self.git('write-tree'))
                     self.git('restore', '--staged', '--', 'docs/' + name)
                     artifact.unlink()
+
+    def assert_iteration_blocks_metadata_change(self, phase, mutate):
+        self.git('restore', '--source=HEAD', '--staged', '--worktree', 'README.md')
+        real_invoke = self.project.invoke
+        changed = False
+
+        def invoke(argv, *args, **options):
+            nonlocal changed
+            self.assertFalse(changed, 'runner invoked a subprocess after metadata changed')
+            if options.get('agent'):
+                self.fixture.write_text('synthetic agent edit\n')
+                if phase == 'agent':
+                    mutate()
+                    changed = True
+                return ''
+            if options.get('untrusted'):
+                self.assertEqual(phase, 'build')
+                mutate()
+                changed = True
+                return ''
+            return real_invoke(argv, *args, **options)
+
+        with patch.dict(os.environ, self.env, clear=True), \
+                patch.object(self.project, 'doctor'), \
+                patch.object(self.project, 'checkout', return_value=self.base), \
+                patch.object(self.project, 'wait_ci', return_value=('success', 1)), \
+                patch.object(self.project, 'invoke', side_effect=invoke), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(d.Blocked, 'Protected Git'):
+                self.project.iteration()
+        self.assertTrue(changed)
+        self.assertIsNone(self.project.pending_review())
+        self.assertEqual(self.fixture.read_text(), 'synthetic agent edit\n')
+        restarted = d.Project('fixture')
+        with patch.object(restarted, 'doctor') as doctor:
+            with self.assertRaisesRegex(d.Blocked, 'Protected Git'):
+                restarted.iteration()
+        doctor.assert_not_called()
+
+    def test_agent_origin_change_blocks_before_further_git_and_after_restart(self):
+        self.assert_iteration_blocks_metadata_change(
+            'agent', lambda: self.git('remote', 'set-url', 'origin', 'https://example.invalid/new.git'))
+
+    def test_build_hook_change_blocks_before_further_git_and_after_restart(self):
+        def add_hook():
+            hook = self.project.repo / '.git' / 'hooks' / 'pre-commit'
+            hook.parent.mkdir(exist_ok=True)
+            hook.write_text('#!/bin/sh\nexit 1\n')
+            hook.chmod(0o700)
+        self.assert_iteration_blocks_metadata_change('build', add_hook)
+
+    def test_build_config_change_blocks_before_further_git_and_after_restart(self):
+        self.assert_iteration_blocks_metadata_change(
+            'build', lambda: self.git('config', 'core.hooksPath', '/synthetic/hooks'))

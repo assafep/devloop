@@ -131,6 +131,7 @@ if sys.argv[1] == 'exec':
             self.assertEqual(d.load(project.state)['status'], 'review')
             self.assertTrue(project.pause.exists())
             self.assertIsNone(project.pending_publication())
+            self.assertFalse(project.git_metadata.exists())
             receipt = project.pending_review()
             self.assertEqual(receipt['id'], d.load(project.state)['review_id'])
             self.assertEqual(receipt['base'], baseline)

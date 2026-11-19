@@ -36,6 +36,8 @@ Once the checkout is clean, run `devloop acknowledge NAME REVIEW_ID` to record t
 
 Before running the test command, DevLoop checks the staged tree for forbidden paths, symlinks, submodules, binary or non-UTF-8 content and common credential formats. The scan accepts up to 1 MiB per changed file and 16 MiB total. A blocked check preserves the checkout and index. Credential detection is heuristic, and staging already writes blobs into the local Git object store. Review the staged diff and use synthetic data.
 
+DevLoop fingerprints the standalone checkout's local Git configuration, hooks and selected metadata before invoking Codex. It compares them after Codex and again after tests, before issuing more Git commands. A mismatch preserves the checkout and the fingerprint across restarts. Inspect and restore the affected Git metadata before resuming. This check covers repository-local files and assumes the surrounding account and Git configuration are trusted.
+
 ## Configuration and local state
 
 Project configs must contain exactly the fields shown in `examples/jobstein.json`. Timings are positive integers, `auto_push` is a boolean, and `test_command` is a JSON argument array. Use canonical repository-relative entries in `allowed_paths` and a trailing slash for directory prefixes. Invalid configs fail before registration.

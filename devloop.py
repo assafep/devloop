@@ -58,6 +58,25 @@ def check_private_file(info):
         raise Blocked('State file must be an owner-only regular file (0600) with one link')
 
 
+def git_file_signature(parent, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or info.st_size > GIT_METADATA_FILE_LIMIT):
+            raise Blocked('Unsupported Git metadata file; inspect the dedicated checkout')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            contents = stream.read(GIT_METADATA_FILE_LIMIT + 1)
+        if len(contents) > GIT_METADATA_FILE_LIMIT:
+            raise Blocked('Git metadata exceeds the inspection limit')
+        return stat.S_IMODE(info.st_mode), hashlib.sha256(contents).hexdigest()
+    finally:
+        os.close(fd)
+
+
 def exists_at(parent, name):
     try:
         info = os.stat(name, dir_fd=parent, follow_symlinks=False)
@@ -167,6 +186,8 @@ CI_LOG_MAX_CHARS = 12000
 CI_LOG_MAX_LINES = 200
 STAGED_BLOB_LIMIT = 1024 * 1024
 STAGED_TOTAL_LIMIT = 16 * STAGED_BLOB_LIMIT
+GIT_METADATA_FILE_LIMIT = 1024 * 1024
+GIT_HOOK_COUNT_LIMIT = 128
 STAGED_SECRET = re.compile(
     r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'
     r'|\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b'
@@ -236,6 +257,7 @@ class Project:
         self.log = self.home / 'activity.log'
         self.state = self.home / 'state.json'
         self.review = self.home / 'review.json'
+        self.git_metadata = self.home / 'git-metadata.json'
         self.pause = self.home / 'paused'
         self.history = self.home / 'history.jsonl'
         self._iteration_active = False
@@ -289,6 +311,7 @@ class Project:
                 raise Blocked('Review ID does not match a pending review; see status')
             if (entry['repository'], entry['branch']) != (self.repository, self.cfg['branch']):
                 raise Blocked('Pending review uses a different repository or branch')
+            self.verify_git_metadata()
             with directory_fd(self.repo, private=False):
                 if self.git('branch', '--show-current') != entry['branch']:
                     raise Blocked('Switch the review checkout back to the configured branch')
@@ -379,6 +402,52 @@ class Project:
             return (out or '').strip()
 
     def git(self, *args, **options): return self.invoke(['git', *args], self.repo, **options)
+
+    def git_metadata_fingerprint(self):
+        git_dir = self.repo / '.git'
+        with directory_fd(git_dir, private=False) as parent:
+            try:
+                os.stat('commondir', dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Blocked('Use a standalone DevLoop checkout for Git metadata checks')
+            config = git_file_signature(parent, 'config')
+            if config is None:
+                raise Blocked('Missing Git configuration in the dedicated checkout')
+            signatures = {'config': config, 'config.worktree': git_file_signature(parent, 'config.worktree')}
+        try:
+            with directory_fd(git_dir / 'hooks', private=False) as hooks:
+                names = os.listdir(hooks)
+                if len(names) > GIT_HOOK_COUNT_LIMIT:
+                    raise Blocked('Too many Git hooks to inspect')
+                signatures['hooks'] = {name: git_file_signature(hooks, name) for name in names}
+        except FileNotFoundError:
+            pass
+        try:
+            with directory_fd(git_dir / 'info', private=False) as info:
+                signatures['info'] = {name: git_file_signature(info, name)
+                                      for name in ('attributes', 'exclude', 'grafts')}
+        except FileNotFoundError:
+            pass
+        return hashlib.sha256(json.dumps(signatures, sort_keys=True).encode('ascii')).hexdigest()
+
+    def verify_git_metadata(self, expected=None):
+        missing = object()
+        recorded = load_private(self.git_metadata, missing)
+        if recorded is missing and expected is None:
+            return
+        if (not isinstance(recorded, str) or not re.fullmatch(r'[0-9a-f]{64}', recorded)
+                or (expected is not None and recorded != expected)):
+            raise Blocked('Invalid Git metadata record; preserve it for inspection')
+        if self.git_metadata_fingerprint() != recorded:
+            raise Blocked('Protected Git config, hooks or metadata changed; checkout preserved')
+
+    def verify_checkout_identity(self, head):
+        if self.git('rev-parse', 'HEAD') != head or self.git('branch', '--show-current') != self.cfg['branch']:
+            raise Blocked('Agent or tests changed Git history or branch')
+        if self.git('remote', 'get-url', 'origin') != self.origin:
+            raise Blocked('Agent or tests changed origin')
 
     def validate_staged_tree(self, base, tree):
         diff_args = ('--no-ext-diff', '--no-textconv')
@@ -539,6 +608,7 @@ class Project:
             if self.pending_review() is not None:
                 self.set_paused()
                 return
+            self.verify_git_metadata()
             publication = self.pending_publication()
             if publication is not None:
                 self.recover_publication(publication)
@@ -581,15 +651,17 @@ class Project:
             remove_private(report)
             with private_open(report, 'a'):
                 pass
+            metadata = self.git_metadata_fingerprint()
+            atomic(self.git_metadata, metadata)
             self.invoke(['codex','exec','--sandbox','workspace-write','-c','approval_policy="never"',
                          '-c','sandbox_workspace_write.network_access=false','--output-last-message',str(report),'-'],
                          self.repo,timeout=self.cfg['agent_timeout_seconds'],capture=False,input_text=prompt,agent=True)
             private_exists(report)
             if STOP or self.is_paused(): raise Blocked('Paused after agent; edits preserved')
-            if self.git('rev-parse','HEAD') != head or self.git('branch','--show-current') != self.cfg['branch']:
-                raise Blocked('Agent changed Git history or branch')
-            if self.git('remote','get-url','origin') != self.origin: raise Blocked('Agent changed origin')
+            self.verify_git_metadata(metadata)
+            self.verify_checkout_identity(head)
             if not self.git('status','--porcelain','--untracked-files=all'):
+                remove_private(self.git_metadata, durable=True)
                 self.record('no-work','Agent produced no changes; paused for review',sha=head)
                 self.set_paused(); return
             self.git('add','-A')
@@ -597,9 +669,12 @@ class Project:
             self.validate_staged_tree(head, before_test)
             self.record('testing','Running configured test command',sha=head)
             self.invoke(self.cfg['test_command'],self.repo,timeout=self.cfg['test_timeout_seconds'],capture=False,untrusted=True)
+            self.verify_git_metadata(metadata)
+            self.verify_checkout_identity(head)
             self.git('add','-A')
             if before_test != self.git('write-tree'): raise Blocked('Tests modified tracked or unignored files; review required')
             if STOP or self.is_paused(): raise Blocked('Paused before publication')
+            remove_private(self.git_metadata, durable=True)
             if not self.cfg['auto_push']:
                 self.pause_for_review(head, before_test)
                 return
