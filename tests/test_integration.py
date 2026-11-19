@@ -93,6 +93,7 @@ elif sys.argv[1:3] == ['run', 'view']:
 from pathlib import Path
 if sys.argv[1] == 'exec':
     home = Path(os.environ['HOME'])
+    home.joinpath('agent-argv.json').write_text(json.dumps(sys.argv[1:]))
     home.joinpath('agent-prompt.txt').write_text(sys.stdin.read())
     home.joinpath('agent-env.json').write_text(json.dumps(dict(os.environ)))
     Path('README.md').write_text('synthetic agent change\\n')
@@ -124,6 +125,12 @@ if sys.argv[1] == 'exec':
                 self.assertEqual(child['GIT_TERMINAL_PROMPT'], '0')
             self.assertIn('CODEX_HOME', d.load(home / 'agent-env.json'))
             self.assertNotIn('CODEX_HOME', d.load(home / 'build-env.json'))
+            agent_argv = d.load(home / 'agent-argv.json')
+            self.assertEqual(agent_argv[:2], ['exec', '--sandbox'])
+            self.assertEqual(agent_argv[2], 'workspace-write')
+            self.assertIn('approval_policy="never"', agent_argv)
+            self.assertIn('sandbox_workspace_write.network_access=false', agent_argv)
+            self.assertNotIn('danger-full-access', agent_argv)
             calls = [json.loads(line) for line in (home / 'gh-calls.jsonl').read_text().splitlines()]
             self.assertTrue(all(call['env']['GH_TOKEN'] == secrets['GH_TOKEN'] for call in calls))
             ci_calls = [call['args'] for call in calls if call['args'][:2] == ['run', 'list']]
