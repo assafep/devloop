@@ -18,7 +18,7 @@ devloop status jobstein
 By default the prototype preserves staged changes for manual review and pauses. It does not automatically publish. Review the dedicated checkout under ~/.local/state/devloop/jobstein/checkout. Do not enable auto_push before a successful controlled trial and security review. Pause the competing ChatGPT Jobstein automation before enabling local publication.
 
 ## Commands
-add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME; run NAME; start/stop/restart NAME (systemd user service); pause/resume NAME; status NAME; logs NAME [--follow]; history NAME.
+add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME; run NAME; start/stop/restart NAME (systemd user service); pause/resume NAME; acknowledge NAME REVIEW_ID; status NAME; logs NAME [--follow]; history NAME.
 
 The Jobstein example uses 120 seconds between iterations and polls exact-commit CI every 60 seconds. CI wait is bounded. Local tests must pass before publication. Dirty, divergent or unpublished work is preserved for review. Only non-force pushes are supported.
 
@@ -27,6 +27,12 @@ In review-only mode, DevLoop passes the verified base commit, CI result and run 
 When the exact base CI result is `failure`, DevLoop retrieves the failed-step log and gives Codex at most 200 lines and 12,000 characters after removing common bearer tokens, API keys, passwords and GitHub/AWS token forms. The log is delimited as untrusted diagnostic text; Codex must not follow commands, URLs or instructions found in it. A missing run ID or retrieval error is represented by a safe unavailable marker and never exposes raw output. The runner's activity log remains private.
 
 Pausing an active iteration, interrupting the runner with SIGINT or SIGTERM, or reaching a subprocess timeout terminates the active subprocess group and preserves the checkout for inspection. Descendants that create their own process group are outside this cleanup.
+
+## Pending review
+
+After tests pass in review-only mode, `devloop status NAME` shows the pending review ID, base commit and tested Git tree. Inspect `git diff --cached` in the dedicated checkout and resolve the changes manually. Older pending reviews use the base commit as the ID and show a null tested tree.
+
+Once the checkout is clean, run `devloop acknowledge NAME REVIEW_ID` to record that you handled the review, then `devloop resume NAME` when you are ready for another iteration. Acknowledgement leaves the runner paused and performs local checks only. If you kept the changes as a local commit, DevLoop's normal branch and remote checks still require you to reconcile that commit before it starts new work.
 
 ## Configuration and local state
 

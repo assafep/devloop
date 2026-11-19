@@ -162,6 +162,7 @@ TIMING_FIELDS = ('interval_seconds', 'ci_poll_seconds', 'ci_timeout_seconds',
 CONFIG_FIELDS = {'repository', 'branch', 'workflow', 'test_command', 'allowed_paths',
                  'instructions', 'auto_push', *TIMING_FIELDS}
 PUBLICATION_FIELDS = {'version', 'repository', 'branch', 'workflow', 'base', 'commit', 'phase'}
+REVIEW_FIELDS = {'id', 'repository', 'branch', 'base', 'tree'}
 CI_LOG_MAX_CHARS = 12000
 CI_LOG_MAX_LINES = 200
 
@@ -226,6 +227,7 @@ class Project:
         self.repo = self.home / 'checkout'
         self.log = self.home / 'activity.log'
         self.state = self.home / 'state.json'
+        self.review = self.home / 'review.json'
         self.pause = self.home / 'paused'
         self.history = self.home / 'history.jsonl'
         self._iteration_active = False
@@ -243,6 +245,59 @@ class Project:
     def set_paused(self):
         with private_open(self.pause, 'a'):
             pass
+
+    def pending_review(self):
+        missing = object()
+        entry = load_private(self.review, missing)
+        if entry is missing:
+            # Previous versions recorded review in the status snapshot only.
+            state = load_private(self.state)
+            if isinstance(state, dict) and state.get('status') == 'review':
+                base = state.get('sha')
+                if not commit_sha(base):
+                    raise Blocked('Invalid legacy review status; preserve it for inspection')
+                return dict(id=base, repository=self.repository, branch=self.cfg['branch'],
+                            base=base, tree=None)
+            return None
+        if (not isinstance(entry, dict) or entry.keys() != REVIEW_FIELDS
+                or not isinstance(entry['id'], str) or not re.fullmatch(r'[0-9a-f]{32}', entry['id'])
+                or not isinstance(entry['repository'], str) or not isinstance(entry['branch'], str)
+                or not commit_sha(entry['base']) or not commit_sha(entry['tree'])):
+            raise Blocked('Invalid review record; preserve it for inspection')
+        return entry
+
+    def pause_for_review(self, base, tree):
+        entry = dict(id=secrets.token_hex(16), repository=self.repository,
+                     branch=self.cfg['branch'], base=base, tree=tree)
+        atomic(self.review, entry)
+        self.set_paused()
+        self.record('review', 'Tests passed; auto_push disabled; staged changes preserved',
+                    sha=base, review_id=entry['id'], tree=tree)
+
+    def acknowledge_review(self, review_id):
+        with exclusive_state_lock(self.home / 'lock'):
+            entry = self.pending_review()
+            if entry is None or entry['id'] != review_id:
+                raise Blocked('Review ID does not match a pending review; see status')
+            if (entry['repository'], entry['branch']) != (self.repository, self.cfg['branch']):
+                raise Blocked('Pending review uses a different repository or branch')
+            with directory_fd(self.repo, private=False):
+                if self.git('branch', '--show-current') != entry['branch']:
+                    raise Blocked('Switch the review checkout back to the configured branch')
+                if self.git('remote', 'get-url', 'origin') != self.origin:
+                    raise Blocked('Unexpected origin URL in review checkout')
+                if self.git('status', '--porcelain', '--untracked-files=all'):
+                    raise Blocked('Resolve staged, unstaged and untracked changes before acknowledging')
+            self.set_paused()
+            self.record('review-acknowledged', 'Operator acknowledged a resolved review; resume when ready',
+                        sha=entry['base'], review_id=review_id, tree=entry['tree'])
+            remove_private(self.review, durable=True)
+
+    def resume(self):
+        with exclusive_state_lock(self.home / 'lock'):
+            if self.pending_review() is not None:
+                raise Blocked('Acknowledge the pending review before resuming; see status')
+            remove_private(self.pause)
 
     def record(self, status, message, **data):
         item = {'time':stamp(), 'status':status, 'message':message, **data}
@@ -437,6 +492,9 @@ class Project:
     def iteration(self):
         with self.lock():
             if self.is_paused() or STOP: return
+            if self.pending_review() is not None:
+                self.set_paused()
+                return
             publication = self.pending_publication()
             if publication is not None:
                 self.recover_publication(publication)
@@ -504,8 +562,8 @@ class Project:
             if before_test != self.git('write-tree'): raise Blocked('Tests modified tracked or unignored files; review required')
             if STOP or self.is_paused(): raise Blocked('Paused before publication')
             if not self.cfg['auto_push']:
-                self.record('review','Tests passed; auto_push disabled; staged changes preserved',sha=head)
-                self.set_paused(); return
+                self.pause_for_review(head, before_test)
+                return
             self.publish(head, before_test)
 
 
@@ -570,6 +628,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='command',required=True)
     add=sub.add_parser('add');add.add_argument('name');add.add_argument('config',type=Path)
+    acknowledge = sub.add_parser('acknowledge')
+    acknowledge.add_argument('name')
+    acknowledge.add_argument('review_id')
     for cmd in ('doctor','run-once','run','start','stop','restart','pause','resume','status','logs','history','configure'):
         p=sub.add_parser(cmd);p.add_argument('name')
         if cmd=='logs':p.add_argument('--follow',action='store_true')
@@ -587,10 +648,12 @@ def main():
     if a.command=='configure': print(p.home/'config.json');return
     if a.command=='doctor': p.doctor();print('Prerequisite checks passed');return
     if a.command=='pause':p.set_paused();print('Pause requested; an active iteration will cancel its subprocess');return
-    if a.command=='resume':remove_private(p.pause);print('Resumed');return
+    if a.command=='resume':p.resume();print('Resumed');return
+    if a.command=='acknowledge':p.acknowledge_review(a.review_id);return
     if a.command=='status':
         print(json.dumps({'paused': p.is_paused(), 'last': load_private(p.state),
-                          'publication': p.pending_publication()}, indent=2))
+                          'publication': p.pending_publication(),
+                          'review': p.pending_review()}, indent=2))
         return
     if a.command=='history':print(read_private(p.history, 'No history'));return
     if a.command=='logs':
