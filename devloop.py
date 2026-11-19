@@ -16,6 +16,7 @@ import time
 
 ROOT = Path(os.environ.get('DEVLOOP_HOME', '~/.local/state/devloop')).expanduser().resolve()
 STOP = False
+SUBPROCESS_POLL_SECONDS = 0.2
 
 def atomic(path, value):
     temp = path.with_suffix('.tmp')
@@ -48,6 +49,7 @@ class Project:
         self.state = self.home / 'state.json'
         self.pause = self.home / 'paused'
         self.history = self.home / 'history.jsonl'
+        self._iteration_active = False
         self.validate_config()
 
     def validate_config(self):
@@ -75,9 +77,20 @@ class Project:
         with (self.home/'lock').open('a') as f:
             try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError: raise Blocked('Another iteration is running')
-            yield
+            self._iteration_active = True
+            try:
+                yield
+            finally:
+                self._iteration_active = False
+
+    def check_cancelled(self):
+        if STOP:
+            raise Blocked('Stop requested; checkout preserved for review')
+        if self._iteration_active and self.pause.exists():
+            raise Blocked('Pause requested; checkout preserved for review')
 
     def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False, untrusted=False):
+        self.check_cancelled()
         env = os.environ.copy()
         if agent or untrusted:
             # Deny unknown variables too: providers and custom credentials vary.
@@ -91,11 +104,28 @@ class Project:
             log.write(f'[{stamp()}] {argv[0]} {argv[1] if len(argv)>1 else ""}\n'); log.flush()
             proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE if capture else log, stderr=log, start_new_session=True)
-            try: out, _ = proc.communicate(input_text, timeout=timeout)
+            deadline = time.monotonic() + timeout
+            try:
+                while True:
+                    self.check_cancelled()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise Blocked(f'Subprocess timed out after {timeout:g}s; checkout preserved for review')
+                    try:
+                        out, _ = proc.communicate(input_text, timeout=min(remaining, SUBPROCESS_POLL_SECONDS))
+                        self.check_cancelled()
+                        break
+                    except subprocess.TimeoutExpired:
+                        # communicate retains buffered input and output for the next call.
+                        input_text = None
             except BaseException:
                 with contextlib.suppress(ProcessLookupError): os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
                 raise
+            finally:
+                for stream in (proc.stdin, proc.stdout):
+                    if stream is not None:
+                        stream.close()
             if proc.returncode: raise Blocked(f'{argv[0]} {argv[1] if len(argv)>1 else ""} exited {proc.returncode}; see local log')
             return (out or '').strip()
 
@@ -134,7 +164,7 @@ class Project:
             if status in ('success','failure') or status.startswith('blocked-'): return status, run_id
             self.record('waiting-ci',status,sha=sha,run_id=run_id)
             if time.monotonic() >= deadline: return 'pending', run_id
-            wait(self.cfg['ci_poll_seconds'])
+            wait(min(self.cfg['ci_poll_seconds'], max(0, deadline - time.monotonic())), self.pause.exists)
         return 'paused', None
 
     def iteration(self):
@@ -221,9 +251,13 @@ def validate_paths(paths,allowed):
             raise Blocked('Change outside configured allowlist; review required')
 
 
-def wait(seconds):
+def wait(seconds, paused=None):
     end=time.monotonic()+seconds
-    while not STOP and time.monotonic()<end: time.sleep(min(1,max(0,end-time.monotonic())))
+    while not STOP and not (paused and paused()):
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(SUBPROCESS_POLL_SECONDS, remaining))
 
 
 def stop_handler(*_):
@@ -255,7 +289,7 @@ def main():
     p=Project(a.name)
     if a.command=='configure': print(p.home/'config.json');return
     if a.command=='doctor': p.doctor();print('Prerequisite checks passed');return
-    if a.command=='pause':p.pause.touch();print('Paused; current subprocess may finish');return
+    if a.command=='pause':p.pause.touch();print('Pause requested; an active iteration will cancel its subprocess');return
     if a.command=='resume':p.pause.unlink(missing_ok=True);print('Resumed');return
     if a.command=='status':print(json.dumps({'paused':p.pause.exists(),'last':load(p.state)},indent=2));return
     if a.command=='history':print(p.history.read_text() if p.history.exists() else 'No history');return

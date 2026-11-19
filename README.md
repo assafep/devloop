@@ -24,6 +24,8 @@ The Jobstein example uses 120 seconds between iterations and polls exact-commit 
 
 In review-only mode, DevLoop passes the verified base commit, CI result and run ID to Codex. Codex checks its local `HEAD` against that commit and uses the runner's result for the base CI gate.
 
+Pausing an active iteration, interrupting the runner with SIGINT or SIGTERM, or reaching a subprocess timeout terminates the active subprocess group and preserves the checkout for inspection. Descendants that create their own process group are outside this cleanup.
+
 ## Live review-only verification
 
 On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a controlled Jobstein `run-once` with real Codex and GitHub CLI. Codex used DevLoop's verified CI result for Jobstein `08e7cfbb336a37988238784e0e4b854220c03dac` without a second GitHub query. Gradle `test` and `installDist` passed in 20 seconds. DevLoop paused in `review` with only the synthetic fixture staged and `auto_push=false`. The trial checkout stayed at the verified base commit. [Jobstein CI run 44478426833](https://github.com/assafep/assaf-jobstein/actions/runs/44478426833)

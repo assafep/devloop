@@ -14,6 +14,7 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = d.Project.__new__(d.Project)
             p.log = Path(tmp) / 'activity.log'
+            p._iteration_active = False
             env = {'PATH': os.defpath, 'HOME': tmp, 'LANG': 'C',
                    'CODEX_HOME': tmp, 'GH_TOKEN': 'synthetic',
                    'GITHUB_TOKEN': 'synthetic', 'CUSTOM_PUBLICATION_SECRET': 'synthetic',
