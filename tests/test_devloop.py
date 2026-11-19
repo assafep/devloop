@@ -70,4 +70,26 @@ class Tests(unittest.TestCase):
         newer=dict(base,databaseId=2,createdAt='2026-01-02',conclusion='failure')
         self.assertEqual(d.classify_ci([base,newer],'a'),('failure',2))
 
+    def test_ci_failure_log_redacts_credentials_and_bounds_untrusted_text(self):
+        raw = 'Authorization: Bearer abc123\nsecret=private-value\nGH_TOKEN=ghp_example\n' + ('x' * 20000)
+        result = d.redact_ci_log(raw)
+        self.assertNotIn('abc123', result)
+        self.assertNotIn('private-value', result)
+        self.assertNotIn('ghp_example', result)
+        self.assertLessEqual(len(result), d.CI_LOG_MAX_CHARS + len('\n[CI failure log truncated]'))
+        self.assertIn('[CI failure log truncated]', result)
+
+    def test_ci_failure_log_retrieval_is_bounded_and_fails_closed(self):
+        project = d.Project.__new__(d.Project)
+        project.cfg = {'repository': 'synthetic/repo'}
+        project.invoke = lambda argv, **_: 'line\nsecret=hidden'
+        self.assertEqual(project.ci_failure_log(42), 'line\nsecret=[REDACTED]')
+        project.invoke = lambda argv, **_: (_ for _ in ()).throw(d.Blocked('offline'))
+        self.assertIn('unavailable', project.ci_failure_log(42))
+
+    def test_ci_failure_log_missing_run_id_is_safe(self):
+        project = d.Project.__new__(d.Project)
+        project.cfg = {'repository': 'synthetic/repo'}
+        self.assertIn('no run ID', project.ci_failure_log(None))
+
 if __name__=='__main__':unittest.main()

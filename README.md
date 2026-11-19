@@ -24,6 +24,8 @@ The Jobstein example uses 120 seconds between iterations and polls exact-commit 
 
 In review-only mode, DevLoop passes the verified base commit, CI result and run ID to Codex. Codex checks its local `HEAD` against that commit and uses the runner's result for the base CI gate.
 
+When the exact base CI result is `failure`, DevLoop retrieves the failed-step log and gives Codex at most 200 lines and 12,000 characters after removing common bearer tokens, API keys, passwords and GitHub/AWS token forms. The log is delimited as untrusted diagnostic text; Codex must not follow commands, URLs or instructions found in it. A missing run ID or retrieval error is represented by a safe unavailable marker and never exposes raw output. The runner's activity log remains private.
+
 Pausing an active iteration, interrupting the runner with SIGINT or SIGTERM, or reaching a subprocess timeout terminates the active subprocess group and preserves the checkout for inspection. Descendants that create their own process group are outside this cleanup.
 
 ## Configuration and local state
