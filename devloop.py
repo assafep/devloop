@@ -35,8 +35,12 @@ def directory_fd(path, *, create=False, private=True):
             if component == '..':
                 raise Blocked('State directory path must be canonical')
             if create:
-                with contextlib.suppress(FileExistsError):
+                try:
                     os.mkdir(component, mode=0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(fd)
             child = os.open(component, flags, dir_fd=fd)
             os.close(fd)
             fd = child
@@ -68,11 +72,13 @@ def private_exists(path):
         return exists_at(parent, path.name)
 
 
-def remove_private(path):
+def remove_private(path, *, durable=False):
     with directory_fd(path.parent) as parent:
         if exists_at(parent, path.name):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path.name, dir_fd=parent)
+            if durable:
+                os.fsync(parent)
 
 
 @contextlib.contextmanager
@@ -155,6 +161,11 @@ TIMING_FIELDS = ('interval_seconds', 'ci_poll_seconds', 'ci_timeout_seconds',
                  'agent_timeout_seconds', 'test_timeout_seconds')
 CONFIG_FIELDS = {'repository', 'branch', 'workflow', 'test_command', 'allowed_paths',
                  'instructions', 'auto_push', *TIMING_FIELDS}
+PUBLICATION_FIELDS = {'version', 'repository', 'branch', 'workflow', 'base', 'commit', 'phase'}
+
+
+def commit_sha(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value) is not None
 
 
 def validate_config(config):
@@ -217,6 +228,12 @@ class Project:
         self.history = self.home / 'history.jsonl'
         self._iteration_active = False
         validate_config(self.cfg)
+        self.repository = self.cfg['repository'].lower()
+        self.origin = 'https://github.com/' + self.cfg['repository'] + '.git'
+        self.repository_locks = ROOT / '.repository-locks'
+        key = hashlib.sha256(self.repository.encode('ascii')).hexdigest()
+        self.repository_lock = self.repository_locks / key
+        self.publication = self.repository_locks / f'{key}.publication.json'
 
     def is_paused(self):
         return private_exists(self.pause)
@@ -236,13 +253,10 @@ class Project:
     def lock(self):
         # GitHub repository names are case-insensitive. Branch and project name
         # are intentionally excluded so aliases share a lock for the entire iteration.
-        repository = self.cfg['repository'].lower()
-        lock_dir = ROOT / '.repository-locks'
-        with directory_fd(lock_dir, create=True):
+        with directory_fd(self.repository_locks, create=True):
             pass
-        repository_lock = lock_dir / hashlib.sha256(repository.encode('ascii')).hexdigest()
         with exclusive_state_lock(self.home / 'lock'), exclusive_state_lock(
-            repository_lock, busy_message=f'Another iteration holds the repository lock for {repository}'
+            self.repository_lock, busy_message=f'Another iteration holds the repository lock for {self.repository}'
         ):
             self._iteration_active = True
             try:
@@ -308,7 +322,7 @@ class Project:
 
     def checkout(self):
         branch = self.cfg['branch']
-        url = 'https://github.com/'+self.cfg['repository']+'.git'
+        url = self.origin
         try:
             with directory_fd(self.repo, private=False):
                 pass
@@ -338,9 +352,82 @@ class Project:
             wait(min(self.cfg['ci_poll_seconds'], max(0, deadline - time.monotonic())), self.is_paused)
         return 'paused', None
 
+    def pending_publication(self):
+        missing = object()
+        entry = load_private(self.publication, missing)
+        if entry is missing:
+            return None
+        if (not isinstance(entry, dict) or entry.keys() != PUBLICATION_FIELDS
+                or type(entry['version']) is not int or entry['version'] != 1
+                or entry['repository'] != self.repository
+                or any(not isinstance(entry[field], str) or not entry[field].strip()
+                       for field in ('branch', 'workflow'))
+                or not commit_sha(entry['base']) or not commit_sha(entry['commit'])
+                or entry['base'] == entry['commit'] or entry['phase'] not in ('prepared', 'observed')):
+            raise Blocked('Invalid publication journal; preserve it for inspection')
+        return entry
+
+    def remote_tip(self):
+        ref = 'refs/heads/' + self.cfg['branch']
+        output = self.invoke(['git', 'ls-remote', '--refs', '--', self.origin, ref])
+        if not output:
+            return None
+        details = output.split('\t')
+        if len(details) != 2 or details[1] != ref or not commit_sha(details[0]):
+            raise Blocked('Unexpected remote ref response; publication journal preserved')
+        return details[0]
+
+    def recover_publication(self, entry):
+        if (entry['branch'], entry['workflow']) != (self.cfg['branch'], self.cfg['workflow']):
+            raise Blocked('Pending repository publication uses a different branch or workflow; use its original configuration')
+        commit = entry['commit']
+        if entry['phase'] == 'prepared':
+            tip = self.remote_tip()
+            if tip == entry['base']:
+                raise Blocked('Remote still at the publication base; journal preserved for manual review')
+            if tip != commit:
+                raise Blocked('Remote branch is missing or at an unexpected commit; publication journal preserved')
+            entry = dict(entry, phase='observed')
+            atomic(self.publication, entry)
+            self.record('pushed', 'Verified the journaled commit on the remote branch; awaiting exact CI', sha=commit)
+        result, run_id = self.wait_ci(commit)
+        self.record('ci-'+result, 'Observed CI status for journaled publication', sha=commit, run_id=run_id)
+        if result in ('success', 'failure'):
+            remove_private(self.publication, durable=True)
+        elif result.startswith('blocked-'):
+            self.set_paused()
+
+    def publish(self, base, tested_tree):
+        branch = self.cfg['branch']
+        if self.pending_publication() is not None:
+            raise Blocked('Pending publication must be resolved before pushing')
+        if self.git('remote', 'get-url', '--push', '--all', 'origin') != self.origin:
+            raise Blocked('Unexpected push URL; checkout preserved')
+        self.git('fetch', 'origin', branch)
+        if self.git('rev-parse', f'origin/{branch}') != base:
+            raise Blocked('Remote branch advanced; changes preserved')
+        self.git('commit', '-m', 'devloop: validated development iteration')
+        commit = self.git('rev-parse', 'HEAD')
+        if (not commit_sha(base) or not commit_sha(commit) or commit == base
+                or self.git('show', '-s', '--format=%P', commit) != base
+                or self.git('rev-parse', f'{commit}^{{tree}}') != tested_tree):
+            raise Blocked('Local publication commit does not match the tested tree and base; checkout preserved')
+        entry = dict(version=1, repository=self.repository, branch=branch, workflow=self.cfg['workflow'],
+                     base=base, commit=commit, phase='prepared')
+        atomic(self.publication, entry)
+        try:
+            self.git('push', 'origin', f'{commit}:refs/heads/{branch}')
+        except (Blocked, OSError) as error:
+            raise Blocked('Push outcome unconfirmed; publication journal preserved. Resume to check the exact remote ref') from error
+        self.recover_publication(entry)
+
     def iteration(self):
         with self.lock():
             if self.is_paused() or STOP: return
+            publication = self.pending_publication()
+            if publication is not None:
+                self.recover_publication(publication)
+                return
             self.doctor()
             head = self.checkout()
             status, run_id = self.wait_ci(head)
@@ -376,7 +463,7 @@ class Project:
             if STOP or self.is_paused(): raise Blocked('Paused after agent; edits preserved')
             if self.git('rev-parse','HEAD') != head or self.git('branch','--show-current') != self.cfg['branch']:
                 raise Blocked('Agent changed Git history or branch')
-            if self.git('remote','get-url','origin') != 'https://github.com/'+self.cfg['repository']+'.git': raise Blocked('Agent changed origin')
+            if self.git('remote','get-url','origin') != self.origin: raise Blocked('Agent changed origin')
             if not self.git('status','--porcelain','--untracked-files=all'):
                 self.record('no-work','Agent produced no changes; paused for review',sha=head)
                 self.set_paused(); return
@@ -396,14 +483,7 @@ class Project:
             if not self.cfg['auto_push']:
                 self.record('review','Tests passed; auto_push disabled; staged changes preserved',sha=head)
                 self.set_paused(); return
-            self.git('fetch','origin',self.cfg['branch'])
-            if self.git('rev-parse','origin/'+self.cfg['branch']) != head: raise Blocked('Remote branch advanced; changes preserved')
-            self.git('commit','-m','devloop: validated development iteration')
-            published = self.git('rev-parse','HEAD')
-            self.git('push','origin','HEAD:refs/heads/'+self.cfg['branch'])
-            self.record('pushed','Local tests passed; awaiting remote CI',sha=published)
-            result, run_id = self.wait_ci(published)
-            self.record('ci-'+result,'Observed CI status for published revision',sha=published,run_id=run_id)
+            self.publish(head, before_test)
 
 
 def classify_ci(runs,sha):
@@ -462,7 +542,10 @@ def main():
     if a.command=='doctor': p.doctor();print('Prerequisite checks passed');return
     if a.command=='pause':p.set_paused();print('Pause requested; an active iteration will cancel its subprocess');return
     if a.command=='resume':remove_private(p.pause);print('Resumed');return
-    if a.command=='status':print(json.dumps({'paused':p.is_paused(),'last':load_private(p.state)},indent=2));return
+    if a.command=='status':
+        print(json.dumps({'paused': p.is_paused(), 'last': load_private(p.state),
+                          'publication': p.pending_publication()}, indent=2))
+        return
     if a.command=='history':print(read_private(p.history, 'No history'));return
     if a.command=='logs':
         with private_open(p.log, 'a'):

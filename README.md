@@ -34,6 +34,12 @@ Use a real, owner-only directory for `DEVLOOP_HOME`. DevLoop requires mode 0700 
 
 Project aliases under one `DEVLOOP_HOME` share a lock for each GitHub repository, regardless of repository-name casing or branch. An iteration holds the lock from preflight through completion. A competing alias pauses with a repository-lock diagnostic. Resume it after the active iteration finishes. Use one state root on a local filesystem for cooperating runners. Separate state roots and hosts require external coordination.
 
+## Publication recovery
+
+Keep `auto_push=false` for review-only operation. The publication path checks the fetched base and the tested tree, then saves a private, durable repository journal before sending a non-force push of the exact commit. `devloop status NAME` shows any pending journal for that repository.
+
+If a push ends with an unconfirmed outcome, use `devloop resume NAME` followed by `devloop run-once NAME` with the original branch and workflow. This recovery iteration works with `auto_push=false`. It checks the remote branch. If the tip matches the journaled commit, DevLoop records that observation and follows CI for that exact SHA, including after a restart. It clears the journal after recording exact-commit CI success or failure. If the remote is unavailable or the branch is missing, unchanged, or at another SHA before the commit was observed, DevLoop pauses and preserves the journal and checkout for manual review. Recovery issues no push.
+
 ## Live review-only verification
 
 On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a controlled Jobstein `run-once` with real Codex and GitHub CLI. Codex used DevLoop's verified CI result for Jobstein `08e7cfbb336a37988238784e0e4b854220c03dac` without a second GitHub query. Gradle `test` and `installDist` passed in 20 seconds. DevLoop paused in `review` with only the synthetic fixture staged and `auto_push=false`. The trial checkout stayed at the verified base commit. [Jobstein CI run 44478426833](https://github.com/assafep/assaf-jobstein/actions/runs/44478426833)

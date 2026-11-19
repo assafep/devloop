@@ -130,6 +130,7 @@ if sys.argv[1] == 'exec':
             self.assertIn('Do not query GitHub again for this CI result.', prompt)
             self.assertEqual(d.load(project.state)['status'], 'review')
             self.assertTrue(project.pause.exists())
+            self.assertIsNone(project.pending_publication())
             self.assertEqual(git('rev-parse', 'HEAD', cwd=project.repo), baseline)
             self.assertEqual(git('--git-dir=' + str(remote), 'rev-parse', 'main'), baseline)
             self.assertEqual(git('diff', '--cached', '--name-only', cwd=project.repo), 'README.md')
