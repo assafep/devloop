@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local, single-writer Codex development loop. Python 3.10+, Linux/WSL."""
 import argparse
+import codecs
 import contextlib
 import datetime
 import fcntl
@@ -187,6 +188,7 @@ TIMING_FIELDS = ('interval_seconds', 'ci_poll_seconds', 'ci_timeout_seconds',
                  'agent_timeout_seconds', 'test_timeout_seconds')
 CONFIG_FIELDS = {'repository', 'branch', 'workflow', 'test_command', 'allowed_paths',
                  'instructions', 'auto_push', *TIMING_FIELDS}
+OPTIONAL_CONFIG_FIELDS = {'test_isolation'}
 PUBLICATION_FIELDS = {'version', 'repository', 'branch', 'workflow', 'base', 'commit', 'phase'}
 REVIEW_FIELDS = {'id', 'repository', 'branch', 'base', 'tree'}
 CI_LOG_MAX_BYTES = 512 * 1024
@@ -221,8 +223,11 @@ def commit_sha(value):
 
 
 def validate_config(config):
-    if not isinstance(config, dict) or config.keys() != CONFIG_FIELDS:
-        raise Blocked('Project configuration must contain exactly the fields in the example')
+    if (not isinstance(config, dict) or not CONFIG_FIELDS <= config.keys()
+            or config.keys() - CONFIG_FIELDS - OPTIONAL_CONFIG_FIELDS):
+        raise Blocked('Project configuration must contain the required fields and only supported options')
+    if config.get('test_isolation', 'host') not in ('host', 'bubblewrap'):
+        raise Blocked('test_isolation must be host or bubblewrap')
     repository = config['repository']
     if (not isinstance(repository, str) or not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9_.-]+', repository)
             or repository.split('/')[1] in ('.', '..')):
@@ -389,26 +394,25 @@ class Project:
             raise CommandTimedOut(f'Subprocess timed out after {timeout:g}s; checkout preserved for review')
         return remaining
 
-    def read_bounded_stdout(self, stream, limit, deadline, timeout):
-        output = bytearray()
+    def stdout_chunks(self, stream, deadline, timeout):
         with selectors.DefaultSelector() as ready:
             ready.register(stream, selectors.EVENT_READ)
             while True:
                 remaining = self.subprocess_time_remaining(deadline, timeout)
                 if not ready.select(min(remaining, SUBPROCESS_POLL_SECONDS)):
                     continue
-                chunk = os.read(stream.fileno(), min(65536, limit + 1 - len(output)))
+                chunk = os.read(stream.fileno(), 65536)
                 if not chunk:
-                    return output
-                output.extend(chunk)
-                if len(output) > limit:
-                    raise OutputLimitExceeded('Subprocess output exceeds the allowed size')
+                    return
+                yield chunk
 
     def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False,
-               untrusted=False, binary=False, private_capture_limit=None):
+               untrusted=False, binary=False, private_capture_limit=None, stream_to_log=False):
         self.check_cancelled()
         if private_capture_limit is not None and (not capture or input_text is not None):
             raise ValueError('Bounded private capture requires stdout capture and no stdin')
+        if stream_to_log and (capture or input_text is not None):
+            raise ValueError('Log streaming requires no captured result or stdin')
         env = os.environ.copy()
         if agent or untrusted:
             # Deny unknown variables too: providers and custom credentials vary.
@@ -421,15 +425,26 @@ class Project:
         with private_open(self.log, 'a') as log:
             log.write(f'[{stamp()}] {argv[0]} {argv[1] if len(argv)>1 else ""}\n'); log.flush()
             private_capture = private_capture_limit is not None
-            proc = subprocess.Popen(argv, cwd=cwd, env=env, text=not (binary or private_capture),
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, text=not (binary or private_capture or stream_to_log),
                                     stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE if capture else log,
-                                    stderr=subprocess.DEVNULL if private_capture else log,
+                                    stdout=subprocess.PIPE if capture or stream_to_log else log,
+                                    stderr=(subprocess.DEVNULL if private_capture
+                                            else subprocess.STDOUT if stream_to_log else log),
                                     start_new_session=True)
             deadline = time.monotonic() + timeout
             try:
                 if private_capture:
-                    bounded = self.read_bounded_stdout(proc.stdout, private_capture_limit, deadline, timeout)
+                    bounded = bytearray()
+                    for chunk in self.stdout_chunks(proc.stdout, deadline, timeout):
+                        if len(bounded) + len(chunk) > private_capture_limit:
+                            raise OutputLimitExceeded('Subprocess output exceeds the allowed size')
+                        bounded.extend(chunk)
+                if stream_to_log:
+                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                    for chunk in self.stdout_chunks(proc.stdout, deadline, timeout):
+                        log.write(decoder.decode(chunk))
+                        log.flush()
+                    log.write(decoder.decode(b'', final=True))
                 while True:
                     remaining = self.subprocess_time_remaining(deadline, timeout)
                     try:
@@ -457,6 +472,47 @@ class Project:
             return (out or '').strip()
 
     def git(self, *args, **options): return self.invoke(['git', *args], self.repo, **options)
+
+    def test_isolation(self):
+        return self.cfg.get('test_isolation', 'host')
+
+    def sandboxed_test_command(self, argv, *, checkout=False):
+        bwrap = shutil.which('bwrap', path='/usr/bin:/bin')
+        if not bwrap:
+            raise Blocked('Bubblewrap test isolation requires a system bwrap executable')
+        command = [
+            bwrap, '--unshare-user', '--disable-userns', '--unshare-pid', '--unshare-net',
+            '--unshare-ipc', '--unshare-uts', '--cap-drop', 'ALL', '--die-with-parent',
+            '--clearenv', '--setenv', 'HOME', '/tmp/home', '--setenv', 'TMPDIR', '/tmp',
+            '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'LANG', 'C.UTF-8',
+            '--setenv', 'GIT_TERMINAL_PROMPT', '0', '--ro-bind', '/usr/bin', '/usr/bin',
+        ]
+        for path in ('/bin', '/lib', '/lib64', '/sbin', '/usr/lib', '/usr/lib64',
+                     '/usr/libexec', '/usr/sbin', '/usr/share', '/usr/include',
+                     '/etc/alternatives', '/etc/ld.so.cache'):
+            command.extend(('--ro-bind-try', path, path))
+        command.extend(('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/tmp/home'))
+        if checkout:
+            with directory_fd(self.repo / '.git', private=False):
+                pass
+            command.extend(('--bind', str(self.repo), '/workspace', '--tmpfs', '/workspace/.git',
+                            '--chdir', '/workspace'))
+            dependencies = self.home / 'test-dependencies'
+            try:
+                with directory_fd(dependencies):
+                    command.extend(('--ro-bind', str(dependencies), '/dependencies'))
+            except FileNotFoundError:
+                pass
+        return [*command, '--', *argv]
+
+    def run_test(self):
+        if self.test_isolation() == 'bubblewrap':
+            self.invoke(self.sandboxed_test_command(self.cfg['test_command'], checkout=True), cwd='/',
+                        timeout=self.cfg['test_timeout_seconds'], capture=False,
+                        untrusted=True, stream_to_log=True)
+        else:
+            self.invoke(self.cfg['test_command'], self.repo, timeout=self.cfg['test_timeout_seconds'],
+                        capture=False, untrusted=True)
 
     def git_metadata_fingerprint(self):
         git_dir = self.repo / '.git'
@@ -538,6 +594,9 @@ class Project:
         self.git('--no-replace-objects', 'diff', *diff_args, '--check', base, tree, '--')
 
     def doctor(self):
+        if self.test_isolation() == 'bubblewrap':
+            self.invoke(self.sandboxed_test_command(['/usr/bin/true']), cwd='/', timeout=15,
+                        capture=False, untrusted=True, stream_to_log=True)
         for exe in ['git','gh','codex']:
             if not shutil.which(exe): raise Blocked(f'Missing executable: {exe}')
         self.invoke(['gh','auth','status'])
@@ -735,7 +794,7 @@ class Project:
             before_test = self.git('write-tree')
             self.validate_staged_tree(head, before_test)
             self.record('testing','Running configured test command',sha=head)
-            self.invoke(self.cfg['test_command'],self.repo,timeout=self.cfg['test_timeout_seconds'],capture=False,untrusted=True)
+            self.run_test()
             self.verify_git_metadata(metadata)
             self.verify_checkout_identity(head)
             self.git('add','-A')
@@ -843,6 +902,7 @@ def main():
                           'review': p.pending_review(),
                           'project': {'name': p.name, 'repository': p.cfg['repository'],
                                       'branch': p.cfg['branch'], 'auto_push': p.cfg['auto_push'],
+                                      'test_isolation': p.test_isolation(),
                                       'checkout': str(p.repo)}}, indent=2))
         return
     if a.command=='history':print(read_private(p.history, 'No history'));return

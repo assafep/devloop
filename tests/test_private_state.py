@@ -45,6 +45,7 @@ class PrivateStateTests(unittest.TestCase):
             'instructions': [None, '  '],
             'agent_timeout_seconds': [True, 0, -1, 1.0, '10'],
             'auto_push': [0, 'false', None],
+            'test_isolation': [None, True, [], 'unknown'],
             'test_command': ['echo test', [], [''], ['echo', 5], ['echo', '\0']],
             'allowed_paths': ['docs/', [], ['/'], ['/etc/passwd'], ['docs/../x'], ['docs//'],
                               ['.github/'], ['docs/', 'docs/'], ['docs\\other']],
@@ -57,6 +58,8 @@ class PrivateStateTests(unittest.TestCase):
                                {key: value for key, value in self.config.items() if key != 'auto_push'}):
             with self.assertRaises(d.Blocked):
                 d.validate_config(invalid_config)
+        d.validate_config(dict(self.config, test_isolation='bubblewrap'))
+        d.validate_config(dict(self.config, test_isolation='host'))
 
     def test_add_rejects_duplicate_keys_and_invalid_config_without_writing_state(self):
         source = self.directory / 'input.json'

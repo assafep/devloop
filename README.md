@@ -58,13 +58,23 @@ DevLoop fingerprints the standalone checkout's local Git configuration, hooks an
 
 ## Configuration and local state
 
-Project configs must contain exactly the fields shown in `examples/jobstein.json`. Timings are positive integers, `auto_push` is a boolean, and `test_command` is a JSON argument array. Use canonical repository-relative entries in `allowed_paths` and a trailing slash for directory prefixes. Invalid configs fail before registration.
+Project configs require the fields shown in `examples/jobstein.json` and accept the optional `test_isolation` setting. Timings are positive integers, `auto_push` is a boolean, and `test_command` is a JSON argument array. Use canonical repository-relative entries in `allowed_paths` and a trailing slash for directory prefixes. Invalid configs fail before registration.
 
 Use a real, owner-only directory for `DEVLOOP_HOME`. DevLoop requires mode 0700 on its state root and project directories, and mode 0600 on runner-owned state files. It rejects symlinked directory components, symlinked checkout roots, and linked or special state files. Configuration and status snapshots use atomic replacement. For existing state, inspect ownership, links and modes before correcting individual paths. Processes with the same user ID still share access to this state.
 
 Project aliases under one `DEVLOOP_HOME` share a lock for each GitHub repository, regardless of repository-name casing or branch. An iteration holds the lock from preflight through completion. A competing alias pauses with a repository-lock diagnostic. Resume it after the active iteration finishes. Use one state root on a local filesystem for cooperating runners. Separate state roots and hosts require external coordination.
 
 A second run of the same project reports lock contention and leaves the active runner's state alone. The configured CI timeout covers both polling delays and GitHub CLI queries. On expiry the runner reports pending CI and leaves any publication journal intact for the next check.
+
+## Build and test filesystem isolation
+
+Set `"test_isolation": "bubblewrap"` in the registered project config to isolate DevLoop's configured `test_command`. The default `"host"` preserves the behavior of existing configs. The selected mode appears in `devloop status NAME`.
+
+The isolated command can write to `/workspace` and its temporary home. It sees selected system runtime paths read-only and uses private process and network namespaces. The runner home, state files and checkout's `.git` directory are hidden, and stdout and stderr reach DevLoop over a pipe. Keep the checkout and system runtime mounts free of credentials. [Bubblewrap namespace documentation](https://github.com/containers/bubblewrap/blob/main/README.md)
+
+Use a system-installed Bubblewrap with unprivileged user namespaces and support for `--disable-userns`. Run `devloop doctor NAME` to probe the namespace setup. If Bubblewrap fails to start, DevLoop blocks without retrying on the host. The sandbox uses its own PATH and temporary home, so login-specific tooling and host build caches are unavailable. For Gradle, prepare a credential-free toolchain and dependency seed, use sandbox-visible paths, and run offline. An optional owner-only `test-dependencies` directory next to `config.json` is mounted read-only at `/dependencies`. Copy any cache files that need writes into the temporary home.
+
+This profile covers the configured build/test subprocess. Codex continues to use its own sandbox and authentication, and the runner keeps access to its Git/GitHub credentials. Host-mode tests have the runner user's filesystem access. The Jobstein example and existing live trial keep their previous settings while a sandbox-ready toolchain is prepared.
 
 ## Publication recovery
 
@@ -79,9 +89,9 @@ On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a co
 ## Safety and limitations
 Agent and configured build/test subprocesses receive only PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TMPDIR and TERM from the runner, plus GIT_TERMINAL_PROMPT=0. Agents also receive CODEX_HOME for user-controlled Codex setup. Unknown environment variables, publication tokens, SSH agent sockets, Git configuration overrides and runtime injection variables are excluded. Build commands needing additional configuration must use a reviewed, user-controlled setup; environment inheritance is deliberately restricted. Runner-side Git/GitHub operations retain their environment for publication.
 
-This filtering covers inherited environment variables only. HOME, CODEX_HOME, PATH executables, temporary directories and repository files can still expose credentials or execute code; Git credential helpers and configuration on disk remain accessible. It does not isolate processes from the runner's user account, filesystem or network. Use a separate account/container with restricted mounts and credentials before running untrusted code.
+Environment filtering alone limits inherited variables. In host mode, HOME, CODEX_HOME, PATH executables, temporary directories and repository files can still expose credentials or execute code. Use a separate account or container with restricted mounts and credentials for the agent and runner when handling sensitive repositories.
 
 This is an initial prototype, not a complete security boundary. Environment variable filtering and path allowlists do not prevent all credential exposure or malicious generated code; the local build command executes code. Keep auto_push disabled. Use isolated credentials and filesystem, never real applicant data. WSL service operation and unattended publication remain unverified. The installer does not start the service. The uninstall script only disables the named service and preserves state.
 
 Run offline tests: `python3 -m unittest discover -s tests -v`. See AGENTS.md and BACKLOG.md for continuation.
-The integration test requires Git and runs a complete review-only iteration with temporary repositories, local clone/fetch transport and synthetic Codex/gh executables. It checks environment filtering and staged-change preservation without live credentials or service calls. It does not validate real Codex sandbox enforcement or filesystem credential isolation.
+The integration test requires Git and runs complete review-only iterations with temporary repositories, local clone/fetch transport and synthetic Codex/gh executables. A separate test probes real Bubblewrap isolation with synthetic credentials and a host loopback listener. It skips on hosts that lack a working Bubblewrap profile. Real Codex sandbox enforcement and WSL service operation require separate validation.
