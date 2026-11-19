@@ -1,97 +1,76 @@
 # DevLoop
 
-A local, reusable Codex development loop for Linux/WSL. Initial prototype; use review-only mode until the security and live integration checks are complete.
+DevLoop runs a bounded Codex development iteration in a dedicated local checkout of a GitHub repository. It checks GitHub Actions for the starting commit, screens the proposed changes, runs your test command, and pauses with the tested changes staged for your review. Start with `"auto_push": false`.
 
-## Quick start
+## Run your first iteration on Linux
 
-Requires Python 3.10+, Git, GitHub CLI, authenticated Codex CLI and the target project's build tools. Use a dedicated isolated Linux environment and repository-scoped credentials.
+You need Python 3.10+, Git with an author identity, authenticated GitHub and Codex CLIs, and your project's test tools. Pick a repository and branch with a GitHub Actions workflow that runs on pushes. Use a dedicated account or isolated environment with limited credentials.
+
+### 1. Install
+
+From the DevLoop source directory, install the foreground runner. Sign in to both CLIs as the Linux user who will run DevLoop.
 
 ```sh
-bash install.sh
+bash install.sh --no-service
 export PATH="$HOME/.local/bin:$PATH"
-devloop add jobstein examples/jobstein.json
-devloop doctor jobstein
-devloop run-once jobstein
-devloop status jobstein
+codex login
+gh auth login --hostname github.com
 ```
 
-By default the prototype preserves staged changes for manual review and pauses. It does not automatically publish. Review the dedicated checkout under ~/.local/state/devloop/jobstein/checkout. Do not enable auto_push before a successful controlled trial and security review. Pause the competing ChatGPT Jobstein automation before enabling local publication.
+### 2. Configure your project
 
-## Linux and WSL setup
+Save the following as `project.json`. Replace the repository, branch, workflow, test command, allowed paths, and task instructions with values for your project. This example uses a Python project and allows changes to `docs/` and `README.md`. A trailing slash allows a directory prefix. The test command is an argument array run from the checkout.
 
-Run setup as the Linux user who will operate DevLoop. On WSL, keep the DevLoop state and checkout on the Linux filesystem for owner-only permissions and file locking. Sign in with `codex login`, then check it with `codex login status`. If the browser callback is unavailable and your account permits device login, use `codex login --device-auth`. Sign in with `gh auth login --hostname github.com` as the same Linux user, then use `devloop doctor jobstein` after registering the project. Use an isolated account and credentials with only the access needed for review. [Codex CLI authentication](https://learn.chatgpt.com/docs/auth)
+```json
+{
+  "repository": "your-org/your-repo",
+  "branch": "main",
+  "workflow": "CI",
+  "interval_seconds": 120,
+  "ci_poll_seconds": 60,
+  "ci_timeout_seconds": 1800,
+  "agent_timeout_seconds": 1200,
+  "test_timeout_seconds": 300,
+  "auto_push": false,
+  "test_command": ["python3", "-B", "-m", "unittest", "discover", "-s", "tests"],
+  "allowed_paths": ["docs/", "README.md"],
+  "instructions": "Make one bounded documentation improvement from the project backlog."
+}
+```
 
-Use `bash install.sh --no-service` for foreground operation. The standard installer copies the user service template under `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`) and requests a daemon reload. It replaces the executable and template atomically, leaving registered projects in place. The template starts with a fixed PATH that includes `~/.local/bin`. If Codex, GitHub CLI or Java depends on shell startup files, configure the service environment explicitly or use the foreground runner.
+See the [operations guide](docs/operations.md#build-and-test-isolation) to select Bubblewrap isolation. With the configuration above, tests run with the runner user's filesystem access.
 
-For the first WSL trial, follow the quick start in a terminal with `auto_push=false`, then inspect the staged diff and review status. To smoke-test the service separately, pause the registered project before starting it and stop the service after checking that it is active. This requires a running systemd user manager. [Microsoft's WSL systemd guide](https://learn.microsoft.com/en-us/windows/wsl/systemd/)
+### 3. Register and run
 
 ```sh
-devloop pause jobstein
-devloop start jobstein
-systemctl --user is-active devloop@jobstein.service
-devloop status jobstein
-devloop stop jobstein
+devloop add my-project project.json
+devloop doctor my-project
+devloop run-once my-project
+devloop status my-project
 ```
 
-`status` shows the configured repository, branch, checkout path and `auto_push` setting. `stop` can stop a named service even if its project configuration is unreadable. `bash uninstall.sh NAME` disables and stops the named instance, preserves project files and reports failures.
+`add` copies the configuration into DevLoop's local state. To edit the registered copy later, get its path with `devloop configure my-project`. Check `status` after each run for the result, checkout path, and any pending review.
 
-## Commands
-add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME; run NAME; start/stop/restart NAME (systemd user service); pause/resume NAME; acknowledge NAME REVIEW_ID; status NAME; logs NAME [--follow]; history NAME.
+### 4. Review and continue
 
-The Jobstein example uses 120 seconds between iterations and polls exact-commit CI every 60 seconds. CI wait is bounded. Local tests must pass before publication. Dirty, divergent or unpublished work is preserved for review. Only non-force pushes are supported.
+When the status is `review`, inspect the staged diff in the checkout shown in `status`. With the default state location:
 
-In review-only mode, DevLoop passes the verified base commit, CI result and run ID to Codex. Codex checks its local `HEAD` against that commit and uses the runner's result for the base CI gate.
+```sh
+git -C "$HOME/.local/state/devloop/my-project/checkout" diff --cached
+```
 
-When the exact base CI result is `failure`, DevLoop reads up to 512 KiB of failed-step output. It gives Codex fixed diagnostic categories such as a possible compilation failure, test failure or dependency resolution failure. Raw stdout and stderr from log retrieval stay out of the prompt and DevLoop's activity log. Missing, oversized or unavailable logs result in a fixed notice. The categories are heuristic clues, and Codex reproduces the failure locally or reports that it needs operator review.
+Resolve the changes manually. Keep them through your project's normal review process or discard them after inspection. Once the dedicated checkout is clean, substitute the review ID from `status` below.
 
-Pausing an active iteration, interrupting the runner with SIGINT or SIGTERM, or reaching a subprocess timeout terminates the active subprocess group and preserves the checkout for inspection. Descendants that create their own process group are outside this cleanup.
+```sh
+devloop acknowledge my-project REVIEW_ID
+devloop resume my-project
+devloop run-once my-project
+```
 
-## Pending review
+A local commit must be reconciled with the configured branch before the next iteration can proceed. If the result is `blocked`, inspect `devloop logs my-project` and the checkout before resuming.
 
-After tests pass in review-only mode, `devloop status NAME` shows the pending review ID, base commit and tested Git tree. Inspect `git diff --cached` in the dedicated checkout and resolve the changes manually. Older pending reviews use the base commit as the ID and show a null tested tree.
+## Where to go next
 
-Once the checkout is clean, run `devloop acknowledge NAME REVIEW_ID` to record that you handled the review, then `devloop resume NAME` when you are ready for another iteration. Acknowledgement leaves the runner paused and performs local checks only. If you kept the changes as a local commit, DevLoop's normal branch and remote checks still require you to reconcile that commit before it starts new work.
-
-Before running the test command, DevLoop checks the staged tree for forbidden paths, symlinks, submodules, binary or non-UTF-8 content and common credential formats. The scan accepts up to 1 MiB per changed file and 16 MiB total. A blocked check preserves the checkout and index. Credential detection is heuristic, and staging already writes blobs into the local Git object store. Review the staged diff and use synthetic data.
-
-DevLoop fingerprints the standalone checkout's local Git configuration, hooks and selected metadata before invoking Codex. It compares them after Codex and again after tests, before issuing more Git commands. A mismatch preserves the checkout and the fingerprint across restarts. Inspect and restore the affected Git metadata before resuming. This check covers repository-local files and assumes the surrounding account and Git configuration are trusted.
-
-## Configuration and local state
-
-Project configs require the fields shown in `examples/jobstein.json` and accept the optional `test_isolation` setting. Timings are positive integers, `auto_push` is a boolean, and `test_command` is a JSON argument array. Use canonical repository-relative entries in `allowed_paths` and a trailing slash for directory prefixes. Invalid configs fail before registration.
-
-Use a real, owner-only directory for `DEVLOOP_HOME`. DevLoop requires mode 0700 on its state root and project directories, and mode 0600 on runner-owned state files. It rejects symlinked directory components, symlinked checkout roots, and linked or special state files. Configuration and status snapshots use atomic replacement. For existing state, inspect ownership, links and modes before correcting individual paths. Processes with the same user ID still share access to this state.
-
-Project aliases under one `DEVLOOP_HOME` share a lock for each GitHub repository, regardless of repository-name casing or branch. An iteration holds the lock from preflight through completion. A competing alias pauses with a repository-lock diagnostic. Resume it after the active iteration finishes. Use one state root on a local filesystem for cooperating runners. Separate state roots and hosts require external coordination.
-
-A second run of the same project reports lock contention and leaves the active runner's state alone. The configured CI timeout covers both polling delays and GitHub CLI queries. On expiry the runner reports pending CI and leaves any publication journal intact for the next check.
-
-## Build and test filesystem isolation
-
-Set `"test_isolation": "bubblewrap"` in the registered project config to isolate DevLoop's configured `test_command`. The default `"host"` preserves the behavior of existing configs. The selected mode appears in `devloop status NAME`.
-
-The isolated command can write to `/workspace` and its temporary home. It sees selected system runtime paths read-only and uses private process and network namespaces. The runner home, state files and checkout's `.git` directory are hidden, and stdout and stderr reach DevLoop over a pipe. Keep the checkout and system runtime mounts free of credentials. [Bubblewrap namespace documentation](https://github.com/containers/bubblewrap/blob/main/README.md)
-
-Use a system-installed Bubblewrap with unprivileged user namespaces and support for `--disable-userns`. Run `devloop doctor NAME` to probe the namespace setup. If Bubblewrap fails to start, DevLoop blocks without retrying on the host. The sandbox uses its own PATH and temporary home, so login-specific tooling and host build caches are unavailable. For Gradle, prepare a credential-free toolchain and dependency seed, use sandbox-visible paths, and run offline. An optional owner-only `test-dependencies` directory next to `config.json` is mounted read-only at `/dependencies`. Copy any cache files that need writes into the temporary home.
-
-This profile covers the configured build/test subprocess. Codex continues to use its own sandbox and authentication, and the runner keeps access to its Git/GitHub credentials. Host-mode tests have the runner user's filesystem access. The Jobstein example and existing live trial keep their previous settings while a sandbox-ready toolchain is prepared.
-
-## Publication recovery
-
-Keep `auto_push=false` for review-only operation. The publication path checks the fetched base and the tested tree, then saves a private, durable repository journal before sending a non-force push of the exact commit. `devloop status NAME` shows any pending journal for that repository.
-
-If a push ends with an unconfirmed outcome, use `devloop resume NAME` followed by `devloop run-once NAME` with the original branch and workflow. This recovery iteration works with `auto_push=false`. It checks the remote branch. If the tip matches the journaled commit, DevLoop records that observation and follows CI for that exact SHA, including after a restart. It clears the journal after recording exact-commit CI success or failure. If the remote is unavailable or the branch is missing, unchanged, or at another SHA before the commit was observed, DevLoop pauses and preserves the journal and checkout for manual review. Recovery issues no push.
-
-## Live review-only verification
-
-On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a controlled Jobstein `run-once` with real Codex and GitHub CLI. Codex used DevLoop's verified CI result for Jobstein `08e7cfbb336a37988238784e0e4b854220c03dac` without a second GitHub query. Gradle `test` and `installDist` passed in 20 seconds. DevLoop paused in `review` with only the synthetic fixture staged and `auto_push=false`. The trial checkout stayed at the verified base commit. [Jobstein CI run 44478426833](https://github.com/assafep/assaf-jobstein/actions/runs/44478426833)
-
-## Safety and limitations
-Agent and configured build/test subprocesses receive only PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TMPDIR and TERM from the runner, plus GIT_TERMINAL_PROMPT=0. Agents also receive CODEX_HOME for user-controlled Codex setup. Unknown environment variables, publication tokens, SSH agent sockets, Git configuration overrides and runtime injection variables are excluded. Build commands needing additional configuration must use a reviewed, user-controlled setup; environment inheritance is deliberately restricted. Runner-side Git/GitHub operations retain their environment for publication.
-
-Environment filtering alone limits inherited variables. In host mode, HOME, CODEX_HOME, PATH executables, temporary directories and repository files can still expose credentials or execute code. Use a separate account or container with restricted mounts and credentials for the agent and runner when handling sensitive repositories.
-
-This is an initial prototype, not a complete security boundary. Environment variable filtering and path allowlists do not prevent all credential exposure or malicious generated code; the local build command executes code. Keep auto_push disabled. Use isolated credentials and filesystem, never real applicant data. WSL service operation and unattended publication remain unverified. The installer does not start the service. The uninstall script only disables the named service and preserves state.
-
-Run offline tests: `python3 -m unittest discover -s tests -v`. See AGENTS.md and BACKLOG.md for continuation.
-The integration test requires Git and runs complete review-only iterations with temporary repositories, local clone/fetch transport and synthetic Codex/gh executables. A separate test probes real Bubblewrap isolation with synthetic credentials and a host loopback listener. It skips on hosts that lack a working Bubblewrap profile. Real Codex sandbox enforcement and WSL service operation require separate validation.
+- [How DevLoop works](docs/workflow.md) shows who does what, which checks run, and how an iteration ends.
+- [Operations guide](docs/operations.md) covers the command reference, user services, state, isolation, and publication recovery.
+- [Backlog](BACKLOG.md) tracks remaining development work. To test changes to DevLoop itself, run `python3 -m unittest discover -s tests -v`.
