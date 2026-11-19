@@ -108,4 +108,43 @@ class Tests(unittest.TestCase):
         project.cfg = {'repository': 'synthetic/repo'}
         self.assertIn('no run ID', project.ci_failure_log(None))
 
+    def test_ci_budget_expires_without_another_lookup(self):
+        project = d.Project.__new__(d.Project)
+        project.cfg = {'ci_timeout_seconds': 3, 'ci_poll_seconds': 60}
+        project.is_paused = lambda: False
+        simulated_time = [0]
+
+        def wait(seconds, paused):
+            self.assertEqual(seconds, 3)
+            self.assertFalse(paused())
+            simulated_time[0] += seconds
+
+        with patch.object(d, 'STOP', False), \
+                patch.object(d.time, 'monotonic', side_effect=lambda: simulated_time[0]), \
+                patch.object(d, 'wait', side_effect=wait), \
+                patch.object(project, 'ci', return_value=('pending', 17)) as ci, \
+                patch.object(project, 'record'):
+            self.assertEqual(project.wait_ci('a' * 40), ('pending', 17))
+        ci.assert_called_once_with('a' * 40, timeout=3)
+
+    def test_ci_budget_cancels_stalled_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = d.Project.__new__(d.Project)
+            project.log = Path(tmp) / 'activity.log'
+            project._iteration_active = False
+            project.cfg = {'repository': 'synthetic/project', 'branch': 'main',
+                           'workflow': 'ci.yml', 'ci_timeout_seconds': 1, 'ci_poll_seconds': 60}
+            project.is_paused = lambda: False
+            real_invoke = project.invoke
+
+            def offline_ci(argv, *, timeout):
+                self.assertEqual(argv[:3], ['gh', 'run', 'list'])
+                self.assertIn('a' * 40, argv)
+                self.assertLessEqual(timeout, 1)
+                return real_invoke([sys.executable, '-c', 'import time; time.sleep(10)'],
+                                   timeout=timeout)
+
+            with patch.object(d, 'STOP', False), patch.object(project, 'invoke', side_effect=offline_ci):
+                self.assertEqual(project.wait_ci('a' * 40), ('pending', None))
+
 if __name__=='__main__':unittest.main()

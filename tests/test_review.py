@@ -88,6 +88,16 @@ class ReviewTests(unittest.TestCase):
         self.assertTrue(recovered.is_paused())
         self.assertEqual(recovered.pending_review()['id'], review_id)
 
+    def test_restart_preserves_dirty_checkout_before_fetch(self):
+        recovered = d.Project('fixture')
+        with patch.dict(os.environ, self.env, clear=True), patch.object(recovered, 'doctor'), \
+                patch.object(recovered, 'wait_ci') as wait_ci:
+            with self.assertRaisesRegex(d.Blocked, 'Dirty checkout preserved'):
+                recovered.iteration()
+        wait_ci.assert_not_called()
+        self.assertEqual(self.git('write-tree'), self.tree)
+        self.assertEqual(self.fixture.read_text(), 'staged change\n')
+
     def test_legacy_review_and_untracked_changes(self):
         with contextlib.redirect_stdout(io.StringIO()):
             self.project.record('review', 'Legacy staged changes', sha=self.base)

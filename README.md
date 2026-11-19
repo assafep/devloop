@@ -46,6 +46,8 @@ Use a real, owner-only directory for `DEVLOOP_HOME`. DevLoop requires mode 0700 
 
 Project aliases under one `DEVLOOP_HOME` share a lock for each GitHub repository, regardless of repository-name casing or branch. An iteration holds the lock from preflight through completion. A competing alias pauses with a repository-lock diagnostic. Resume it after the active iteration finishes. Use one state root on a local filesystem for cooperating runners. Separate state roots and hosts require external coordination.
 
+A second run of the same project reports lock contention and leaves the active runner's state alone. The configured CI timeout covers both polling delays and GitHub CLI queries. On expiry the runner reports pending CI and leaves any publication journal intact for the next check.
+
 ## Publication recovery
 
 Keep `auto_push=false` for review-only operation. The publication path checks the fetched base and the tested tree, then saves a private, durable repository journal before sending a non-force push of the exact commit. `devloop status NAME` shows any pending journal for that repository.

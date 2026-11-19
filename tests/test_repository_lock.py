@@ -114,6 +114,18 @@ class RepositoryLockTests(unittest.TestCase):
         self.assertEqual(list(locks.iterdir()), [lock])
         self.assertEqual(lock.stat().st_ino, inode)
 
+    def test_second_command_for_same_project_does_not_pause_active_iteration(self):
+        with self.active_iteration() as holder:
+            duplicate = self.cli('run-once', 'first')
+            self.assertEqual(duplicate.returncode, 1)
+            self.assertIn('holds the project lock', duplicate.stderr)
+            status = json.loads(self.cli('status', 'first').stdout)
+            self.assertFalse(status['paused'])
+            self.assertIsNone(status['last'])
+            output, errors = holder.communicate('', timeout=5)
+            self.assertEqual(holder.returncode, 0, errors)
+            self.assertEqual(json.loads(output)['status'], 'ci-blocked-fixture')
+
     def test_symlinked_repository_lock_directory_is_rejected(self):
         target = self.root / 'target'
         target.mkdir(mode=0o700)

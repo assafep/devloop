@@ -20,8 +20,11 @@ import time
 ROOT = Path(os.environ.get('DEVLOOP_HOME', '~/.local/state/devloop')).expanduser().absolute()
 STOP = False
 SUBPROCESS_POLL_SECONDS = 0.2
+CI_LOOKUP_MAX_SECONDS = 120
 
 class Blocked(RuntimeError): pass
+class CommandTimedOut(Blocked): pass
+class ProjectBusy(Blocked): pass
 
 
 @contextlib.contextmanager
@@ -117,12 +120,14 @@ def private_open(path, mode='r'):
 
 
 @contextlib.contextmanager
-def exclusive_state_lock(path, *, busy_message='Another operation holds the project lock'):
+def exclusive_state_lock(path, *, busy_message=None):
     with private_open(path, 'a') as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise Blocked(busy_message) from error
+            if busy_message is not None:
+                raise Blocked(busy_message) from error
+            raise ProjectBusy('Another operation holds the project lock') from error
         yield
 
 
@@ -380,7 +385,7 @@ class Project:
                     self.check_cancelled()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise Blocked(f'Subprocess timed out after {timeout:g}s; checkout preserved for review')
+                        raise CommandTimedOut(f'Subprocess timed out after {timeout:g}s; checkout preserved for review')
                     try:
                         out, _ = proc.communicate(input_text, timeout=min(remaining, SUBPROCESS_POLL_SECONDS))
                         self.check_cancelled()
@@ -507,9 +512,10 @@ class Project:
         if head != self.git('rev-parse',f'origin/{branch}'): raise Blocked('Unpublished local commits preserved for manual review')
         return head
 
-    def ci(self, sha):
+    def ci(self, sha, *, timeout):
         raw = self.invoke(['gh','run','list','-R',self.cfg['repository'],'--branch',self.cfg['branch'],'--commit',sha,
-                           '--workflow',self.cfg['workflow'],'--limit','100','--json','headSha,status,conclusion,event,databaseId,createdAt'])
+                           '--workflow',self.cfg['workflow'],'--limit','100',
+                           '--json','headSha,status,conclusion,event,databaseId,createdAt'], timeout=timeout)
         return classify_ci(json.loads(raw),sha)
 
     def ci_failure_log(self, run_id):
@@ -524,12 +530,23 @@ class Project:
         return redact_ci_log(raw)
 
     def wait_ci(self, sha):
-        deadline = time.monotonic()+self.cfg['ci_timeout_seconds']
+        deadline = time.monotonic() + self.cfg['ci_timeout_seconds']
+        run_id = None
         while not STOP and not self.is_paused():
-            status, run_id = self.ci(sha)
-            if status in ('success','failure') or status.startswith('blocked-'): return status, run_id
-            self.record('waiting-ci',status,sha=sha,run_id=run_id)
-            if time.monotonic() >= deadline: return 'pending', run_id
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return 'pending', run_id
+            try:
+                status, run_id = self.ci(sha, timeout=min(CI_LOOKUP_MAX_SECONDS, remaining))
+            except CommandTimedOut:
+                if remaining <= CI_LOOKUP_MAX_SECONDS:
+                    return 'pending', run_id
+                raise
+            if time.monotonic() >= deadline:
+                return 'pending', run_id
+            if status in ('success', 'failure') or status.startswith('blocked-'):
+                return status, run_id
+            self.record('waiting-ci', status, sha=sha, run_id=run_id)
             wait(min(self.cfg['ci_poll_seconds'], max(0, deadline - time.monotonic())), self.is_paused)
         return 'paused', None
 
@@ -797,8 +814,11 @@ def main():
     while not STOP:
         if not p.is_paused():
             try:p.iteration()
+            except ProjectBusy:
+                raise
             except (Blocked,subprocess.TimeoutExpired, OSError,ValueError) as e:
-                p.record('blocked',str(e));p.set_paused()
+                with exclusive_state_lock(p.home / 'lock'):
+                    p.record('blocked',str(e));p.set_paused()
                 if a.command=='run-once':return 1
         if a.command=='run-once':return 0
         wait(p.cfg['interval_seconds'])
