@@ -99,7 +99,8 @@ if sys.argv[1] == 'exec':
             )
             state_root = root / 'state'
             project_home = state_root / 'fixture'
-            project_home.mkdir(parents=True)
+            state_root.mkdir(mode=0o700)
+            project_home.mkdir(mode=0o700)
             cfg = d.load(Path(__file__).resolve().parents[1] / 'examples/jobstein.json')
             cfg.update(repository='synthetic/project', allowed_paths=['README.md'],
                        test_command=[sys.executable, '-c', build_code],

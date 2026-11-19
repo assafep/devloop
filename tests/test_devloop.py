@@ -56,7 +56,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(d.Blocked):d.validate_paths([path],['src/','README.md'])
     def test_atomic_and_lock(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(d,'ROOT',Path(tmp)):
-            home=Path(tmp)/'jobstein';home.mkdir()
+            home=Path(tmp)/'jobstein';home.mkdir(mode=0o700)
             cfg=d.load(Path(__file__).resolve().parents[1]/'examples/jobstein.json')
             d.atomic(home/'config.json',cfg)
             p=d.Project('jobstein')

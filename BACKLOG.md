@@ -5,6 +5,7 @@ Baseline: Python runner prototype, installer, Jobstein example, offline CI and a
 1. Harden subprocess isolation, cancellation, sensitive environment handling and sandbox boundaries; build/test code must not inherit publication credentials. Keep auto_push disabled until reviewed.
    - Verified offline: environment allowlists exclude synthetic publication secrets, SSH sockets, Git overrides and runtime injection variables from agent and build/test subprocesses. Pause, stop signals and subprocess timeouts cancel the active process group and preserve the checkout. Filesystem credential isolation and sandbox hardening remain open. The example keeps `auto_push=false`.
 2. Strict configuration schema; atomic private state, symlink protection, repository-level locking across aliases and concurrent commands.
+   - Verified offline: strict JSON configuration, owner-only state, atomic snapshots, and rejection of symlinked directories, linked files and special files. Registration uses the existing per-project lock. Repository-level locking across aliases and the remaining concurrent command cases are open.
 3. Durable publication/recovery journal, ambiguous push outcome recovery, stale-head and exact CI checks; failure logs passed safely to agent.
 4. Review workflow and explicit acknowledgement; staged changes, forbidden paths and binary/secret scanning; tests for git hooks/config/remote changes.
 5. Offline integration tests using temporary Git repositories and fake Codex/gh executables, cancellation, CI timeout, restart and publication scenarios.

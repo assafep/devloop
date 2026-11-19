@@ -39,7 +39,7 @@ class CancellationTests(unittest.TestCase):
         self.start_patch('ROOT', root)
         self.start_patch('STOP', False)
         home = root / 'fixture'
-        home.mkdir()
+        home.mkdir(mode=0o700)
         config = d.load(Path(__file__).resolve().parents[1] / 'examples/jobstein.json')
         d.atomic(home / 'config.json', config)
         self.project = d.Project('fixture')
@@ -87,7 +87,7 @@ class CancellationTests(unittest.TestCase):
 
         def pause():
             self.wait_ready()
-            self.project.pause.touch()
+            self.project.set_paused()
 
         with ThreadPoolExecutor(1) as executor, self.project.lock():
             trigger = executor.submit(pause)
