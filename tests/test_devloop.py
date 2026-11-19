@@ -52,8 +52,24 @@ class Tests(unittest.TestCase):
         self.assertEqual(d.classify_ci(runs,'a'),('blocked-cancelled',2))
     def test_paths(self):
         d.validate_paths(['src/a.java','README.md'],['src/','README.md'])
-        for path in ['src/cv.pdf','src/secrets/key','src/.env','.github/workflows/ci.yml','build.gradle.kts']:
+        for path in ['src/cv.pdf', 'src/Secrets/key', 'src/.env.local', 'src/.env',
+                     '.github/workflows/ci.yml', 'src/new\nline', 'src/back\\slash',
+                     'src/../outside', 'build.gradle.kts']:
             with self.assertRaises(d.Blocked):d.validate_paths([path],['src/','README.md'])
+
+    def test_staged_blob_checks(self):
+        for blob, expected in (
+            (b'\x00', 'binary'),
+            (b'\xff', 'binary'),
+            (b'Staged executable\x1b', 'control'),
+            (b'-----BEGIN OPENSSH PRIVATE KEY-----', 'credential'),
+            (b'ghp_' + b'x' * 36, 'credential'),
+            (b'ASIA' + b'B' * 16, 'credential'),
+        ):
+            with self.subTest(expected=expected), self.assertRaisesRegex(d.Blocked, expected):
+                d.validate_staged_blob(blob)
+        for blob in (b'', b'line\r\n\ttext\n', 'Café\n'.encode(), b'Document the ghp_ prefix.'):
+            d.validate_staged_blob(blob)
     def test_atomic_and_lock(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(d,'ROOT',Path(tmp)):
             home=Path(tmp)/'jobstein';home.mkdir(mode=0o700)

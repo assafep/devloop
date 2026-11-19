@@ -165,6 +165,14 @@ PUBLICATION_FIELDS = {'version', 'repository', 'branch', 'workflow', 'base', 'co
 REVIEW_FIELDS = {'id', 'repository', 'branch', 'base', 'tree'}
 CI_LOG_MAX_CHARS = 12000
 CI_LOG_MAX_LINES = 200
+STAGED_BLOB_LIMIT = 1024 * 1024
+STAGED_TOTAL_LIMIT = 16 * STAGED_BLOB_LIMIT
+STAGED_SECRET = re.compile(
+    r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'
+    r'|\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,})\b'
+    r'|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'
+    r'|\b(?:sk_live_|rk_live_|sk-proj-|xox[baprs]-)[A-Za-z0-9_-]{20,}\b'
+)
 
 
 def commit_sha(value):
@@ -327,7 +335,8 @@ class Project:
         if self._iteration_active and self.is_paused():
             raise Blocked('Pause requested; checkout preserved for review')
 
-    def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False, untrusted=False):
+    def invoke(self, argv, cwd=None, timeout=120, capture=True, input_text=None, agent=False,
+               untrusted=False, binary=False):
         self.check_cancelled()
         env = os.environ.copy()
         if agent or untrusted:
@@ -340,7 +349,7 @@ class Project:
         env['GIT_TERMINAL_PROMPT'] = '0'
         with private_open(self.log, 'a') as log:
             log.write(f'[{stamp()}] {argv[0]} {argv[1] if len(argv)>1 else ""}\n'); log.flush()
-            proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, text=not binary, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE if capture else log, stderr=log, start_new_session=True)
             deadline = time.monotonic() + timeout
             try:
@@ -365,9 +374,44 @@ class Project:
                     if stream is not None:
                         stream.close()
             if proc.returncode: raise Blocked(f'{argv[0]} {argv[1] if len(argv)>1 else ""} exited {proc.returncode}; see local log')
+            if binary:
+                return out or b''
             return (out or '').strip()
 
-    def git(self, *args): return self.invoke(['git', *args], self.repo)
+    def git(self, *args, **options): return self.invoke(['git', *args], self.repo, **options)
+
+    def validate_staged_tree(self, base, tree):
+        diff_args = ('--no-ext-diff', '--no-textconv')
+        raw = self.git('--no-replace-objects', 'diff', *diff_args, '--raw', '--no-abbrev',
+                       '--no-renames', '-z', base, tree, '--', binary=True)
+        if not raw:
+            raise Blocked('Changes did not produce a staged diff; checkout preserved')
+        fields = raw.removesuffix(b'\0').split(b'\0')
+        if not raw.endswith(b'\0') or len(fields) % 2:
+            raise Blocked('Unexpected staged tree diff format; checkout preserved')
+        total = 0
+        for metadata, raw_path in zip(fields[::2], fields[1::2]):
+            try:
+                path = raw_path.decode('utf-8')
+            except UnicodeDecodeError:
+                raise Blocked('Changed path is not valid UTF-8; review required') from None
+            validate_paths([path], self.cfg['allowed_paths'])
+            match = re.fullmatch(rb':[0-7]{6} ([0-7]{6}) [0-9a-f]{40} ([0-9a-f]{40}) [AMDT]', metadata)
+            if not match:
+                raise Blocked('Unexpected staged tree entry; checkout preserved')
+            mode, oid = match.groups()
+            if mode == b'000000':
+                continue
+            if mode not in (b'100644', b'100755'):
+                raise Blocked('Changed symlink or submodule requires manual review')
+            object_id = oid.decode('ascii')
+            size = int(self.git('--no-replace-objects', 'cat-file', '-s', object_id))
+            total += size
+            if size > STAGED_BLOB_LIMIT or total > STAGED_TOTAL_LIMIT:
+                raise Blocked('Staged content exceeds the offline scan limit; review required')
+            blob = self.git('--no-replace-objects', 'cat-file', 'blob', object_id, binary=True)
+            validate_staged_blob(blob)
+        self.git('--no-replace-objects', 'diff', *diff_args, '--check', base, tree, '--')
 
     def doctor(self):
         for exe in ['git','gh','codex']:
@@ -549,13 +593,8 @@ class Project:
                 self.record('no-work','Agent produced no changes; paused for review',sha=head)
                 self.set_paused(); return
             self.git('add','-A')
-            paths = self.git('diff','--cached','--name-only','--no-renames','-z').split('\0')
-            validate_paths([p for p in paths if p],self.cfg['allowed_paths'])
-            self.git('diff','--cached','--check')
-            for line in self.git('ls-files','--stage').splitlines():
-                if line.startswith(('120000 ', '160000 ')) and line.split('\t',1)[-1] in paths:
-                    raise Blocked('Changed symlink or submodule requires manual review')
             before_test = self.git('write-tree')
+            self.validate_staged_tree(head, before_test)
             self.record('testing','Running configured test command',sha=head)
             self.invoke(self.cfg['test_command'],self.repo,timeout=self.cfg['test_timeout_seconds'],capture=False,untrusted=True)
             self.git('add','-A')
@@ -602,11 +641,26 @@ def redact_ci_log(value):
 
 def validate_paths(paths,allowed):
     for p in paths:
-        parts=Path(p).parts
-        if any(x in ('.git','.github','secrets','credentials','.env') for x in parts) or p.lower().endswith(('.pdf','.pem','.key','.p12','.jks')):
+        if any(ord(char) < 32 or char in '\x7f\\' for char in p):
+            raise Blocked('Changed path contains control characters or backslashes; review required')
+        parts = p.lower().removesuffix('/').split('/')
+        if (any(part in ('', '.', '..', '.git', '.github', 'secrets', 'credentials', '.env')
+                or part.startswith('.env.') for part in parts)
+                or p.lower().endswith(('.pdf','.pem','.key','.p12','.jks'))):
             raise Blocked('Forbidden changed path; review required')
         if not any(p==a or (a.endswith('/') and p.startswith(a)) for a in allowed):
             raise Blocked('Change outside configured allowlist; review required')
+
+
+def validate_staged_blob(blob):
+    try:
+        text = blob.decode('utf-8')
+    except UnicodeDecodeError:
+        raise Blocked('Staged binary or non-UTF-8 content requires manual review') from None
+    if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', text):
+        raise Blocked('Staged binary or control characters require manual review')
+    if STAGED_SECRET.search(text):
+        raise Blocked('Possible credential in staged content; manual review required')
 
 
 def wait(seconds, paused=None):

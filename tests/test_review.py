@@ -109,3 +109,40 @@ class ReviewTests(unittest.TestCase):
             for command in (('acknowledge', review_id), ('resume',)):
                 self.assertIn('holds the project lock', self.cli(*command).stderr)
         self.assertEqual(self.project.pending_review()['id'], review_id)
+
+    def test_staged_validation_scans_index_blobs_and_ignores_worktree_edits(self):
+        self.fixture.write_text('temporary unstaged edit\n')
+        with patch.dict(os.environ, self.env, clear=True):
+            self.project.validate_staged_tree(self.base, self.tree)
+            self.fixture.write_bytes(b'ghp_' + b'x' * 36 + b'\n')
+            self.git('add', 'README.md')
+            secret_tree = self.git('write-tree')
+            self.fixture.write_text('clean worktree edit\n')
+            with self.assertRaisesRegex(d.Blocked, 'Possible credential'):
+                self.project.validate_staged_tree(self.base, secret_tree)
+        self.assertEqual(self.git('write-tree'), secret_tree)
+        self.assertEqual(self.fixture.read_text(), 'clean worktree edit\n')
+        self.assertNotIn('ghp_' + 'x' * 36, d.read_private(self.project.log))
+
+    def test_staged_tree_rejects_binary_symlink_size_and_forbidden_paths(self):
+        self.project.cfg['allowed_paths'].append('docs/')
+        docs = self.project.repo / 'docs'
+        docs.mkdir()
+        with patch.dict(os.environ, self.env, clear=True):
+            for name, contents, expected in (
+                ('sample.txt', b'\0', 'binary'),
+                ('link with spaces', None, 'symlink'),
+                ('large.txt', b'x' * (d.STAGED_BLOB_LIMIT + 1), 'scan limit'),
+                ('.env.fixture', b'example\n', 'Forbidden'),
+            ):
+                with self.subTest(name=name):
+                    artifact = docs / name
+                    if contents is None:
+                        artifact.symlink_to('../README.md')
+                    else:
+                        artifact.write_bytes(contents)
+                    self.git('add', '--', 'docs/' + name)
+                    with self.assertRaisesRegex(d.Blocked, expected):
+                        self.project.validate_staged_tree(self.base, self.git('write-tree'))
+                    self.git('restore', '--staged', '--', 'docs/' + name)
+                    artifact.unlink()

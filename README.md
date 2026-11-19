@@ -34,6 +34,8 @@ After tests pass in review-only mode, `devloop status NAME` shows the pending re
 
 Once the checkout is clean, run `devloop acknowledge NAME REVIEW_ID` to record that you handled the review, then `devloop resume NAME` when you are ready for another iteration. Acknowledgement leaves the runner paused and performs local checks only. If you kept the changes as a local commit, DevLoop's normal branch and remote checks still require you to reconcile that commit before it starts new work.
 
+Before running the test command, DevLoop checks the staged tree for forbidden paths, symlinks, submodules, binary or non-UTF-8 content and common credential formats. The scan accepts up to 1 MiB per changed file and 16 MiB total. A blocked check preserves the checkout and index. Credential detection is heuristic, and staging already writes blobs into the local Git object store. Review the staged diff and use synthetic data.
+
 ## Configuration and local state
 
 Project configs must contain exactly the fields shown in `examples/jobstein.json`. Timings are positive integers, `auto_push` is a boolean, and `test_command` is a JSON argument array. Use canonical repository-relative entries in `allowed_paths` and a trailing slash for directory prefixes. Invalid configs fail before registration.
