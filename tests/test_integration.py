@@ -86,8 +86,9 @@ if sys.argv[1:3] == ['run', 'list']:
             executable('codex', '''import json, os, sys
 from pathlib import Path
 if sys.argv[1] == 'exec':
-    assert sys.stdin.read(), 'Expected development prompt'
-    Path(os.environ['HOME'], 'agent-env.json').write_text(json.dumps(dict(os.environ)))
+    home = Path(os.environ['HOME'])
+    home.joinpath('agent-prompt.txt').write_text(sys.stdin.read())
+    home.joinpath('agent-env.json').write_text(json.dumps(dict(os.environ)))
     Path('README.md').write_text('synthetic agent change\\n')
     Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('Synthetic report')
 ''')
@@ -121,6 +122,11 @@ if sys.argv[1] == 'exec':
             ci_calls = [call['args'] for call in calls if call['args'][:2] == ['run', 'list']]
             self.assertEqual(len(ci_calls), 1)
             self.assertEqual(ci_calls[0][ci_calls[0].index('--commit') + 1], baseline)
+            prompt = (home / 'agent-prompt.txt').read_text()
+            self.assertIn(f'Base commit {baseline}. Required CI workflow result: success. Run ID: 1.', prompt)
+            self.assertIn('git rev-parse HEAD matches the full base commit and stop if it differs', prompt)
+            self.assertIn('Use the supplied result and run ID to satisfy the project instructions on checking base CI.', prompt)
+            self.assertIn('Do not query GitHub again for this CI result.', prompt)
             self.assertEqual(d.load(project.state)['status'], 'review')
             self.assertTrue(project.pause.exists())
             self.assertEqual(git('rev-parse', 'HEAD', cwd=project.repo), baseline)

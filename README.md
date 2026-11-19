@@ -22,6 +22,8 @@ add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME
 
 The Jobstein example uses 120 seconds between iterations and polls exact-commit CI every 60 seconds. CI wait is bounded. Local tests must pass before publication. Dirty, divergent or unpublished work is preserved for review. Only non-force pushes are supported.
 
+In review-only mode, DevLoop passes the verified base commit, CI result and run ID to Codex. Codex checks its local `HEAD` against that commit and uses the runner's result for the base CI gate.
+
 ## Safety and limitations
 Agent and configured build/test subprocesses receive only PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TMPDIR and TERM from the runner, plus GIT_TERMINAL_PROMPT=0. Agents also receive CODEX_HOME for user-controlled Codex setup. Unknown environment variables, publication tokens, SSH agent sockets, Git configuration overrides and runtime injection variables are excluded. Build commands needing additional configuration must use a reviewed, user-controlled setup; environment inheritance is deliberately restricted. Runner-side Git/GitHub operations retain their environment for publication.
 

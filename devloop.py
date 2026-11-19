@@ -147,8 +147,18 @@ class Project:
                 self.record('ci-'+status,'No development until required CI completes',sha=head,run_id=run_id)
                 return
             self.record('developing',f'Base CI {status}',sha=head,run_id=run_id)
+            review_ci_instructions = ''
+            if not self.cfg['auto_push']:
+                review_ci_instructions = (
+                    'DevLoop verified the exact-commit CI result above. '
+                    'Confirm that git rev-parse HEAD matches the full base commit and stop if it differs. '
+                    'Use the supplied result and run ID to satisfy the project instructions on checking base CI. '
+                    'Do not query GitHub again for this CI result. '
+                    'If CI failed and local evidence is insufficient to diagnose it, report the blocker. '
+                )
             prompt = self.cfg['instructions']+'\n\n' + (
                 f'Base commit {head}. Required CI workflow result: {status}. Run ID: {run_id}. '
+                f'{review_ci_instructions}'
                 'If failed, repair CI first; do not add unrelated features. Otherwise implement one bounded improvement. '
                 'Read AGENTS.md and architecture/backlog docs. Use synthetic fixtures. Do not commit, push, access real secrets, '
                 'provision cloud services, or send messages. Do not change Git configuration, hooks, remotes, branches or CI workflows. '
