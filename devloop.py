@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -91,12 +92,12 @@ def private_open(path, mode='r'):
 
 
 @contextlib.contextmanager
-def exclusive_state_lock(path):
+def exclusive_state_lock(path, *, busy_message='Another operation holds the project lock'):
     with private_open(path, 'a') as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise Blocked('Another operation holds the project lock') from error
+            raise Blocked(busy_message) from error
         yield
 
 
@@ -233,7 +234,16 @@ class Project:
 
     @contextlib.contextmanager
     def lock(self):
-        with exclusive_state_lock(self.home / 'lock'):
+        # GitHub repository names are case-insensitive. Branch and project name
+        # are intentionally excluded so aliases share a lock for the entire iteration.
+        repository = self.cfg['repository'].lower()
+        lock_dir = ROOT / '.repository-locks'
+        with directory_fd(lock_dir, create=True):
+            pass
+        repository_lock = lock_dir / hashlib.sha256(repository.encode('ascii')).hexdigest()
+        with exclusive_state_lock(self.home / 'lock'), exclusive_state_lock(
+            repository_lock, busy_message=f'Another iteration holds the repository lock for {repository}'
+        ):
             self._iteration_active = True
             try:
                 yield

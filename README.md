@@ -32,6 +32,8 @@ Project configs must contain exactly the fields shown in `examples/jobstein.json
 
 Use a real, owner-only directory for `DEVLOOP_HOME`. DevLoop requires mode 0700 on its state root and project directories, and mode 0600 on runner-owned state files. It rejects symlinked directory components, symlinked checkout roots, and linked or special state files. Configuration and status snapshots use atomic replacement. For existing state, inspect ownership, links and modes before correcting individual paths. Processes with the same user ID still share access to this state.
 
+Project aliases under one `DEVLOOP_HOME` share a lock for each GitHub repository, regardless of repository-name casing or branch. An iteration holds the lock from preflight through completion. A competing alias pauses with a repository-lock diagnostic. Resume it after the active iteration finishes. Use one state root on a local filesystem for cooperating runners. Separate state roots and hosts require external coordination.
+
 ## Live review-only verification
 
 On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a controlled Jobstein `run-once` with real Codex and GitHub CLI. Codex used DevLoop's verified CI result for Jobstein `08e7cfbb336a37988238784e0e4b854220c03dac` without a second GitHub query. Gradle `test` and `installDist` passed in 20 seconds. DevLoop paused in `review` with only the synthetic fixture staged and `auto_push=false`. The trial checkout stayed at the verified base commit. [Jobstein CI run 44478426833](https://github.com/assafep/assaf-jobstein/actions/runs/44478426833)
