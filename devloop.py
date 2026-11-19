@@ -243,9 +243,13 @@ def validate_config(config):
         raise Blocked('allowed_paths must not contain duplicates')
 
 
-def project_home(name):
+def validate_project_name(name):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,50}', name):
         raise Blocked('Invalid project name')
+
+
+def project_home(name):
+    validate_project_name(name)
     home = ROOT / name
     with directory_fd(ROOT, create=True), directory_fd(home, create=True):
         return home
@@ -790,6 +794,10 @@ def main():
                 raise Blocked('Project already exists; use configure')
             atomic(path, config)
         print(path);return
+    if a.command == 'stop':
+        validate_project_name(a.name)
+        subprocess.run(['systemctl', '--user', 'stop', f'devloop@{a.name}.service'], check=True)
+        return
     p=Project(a.name)
     if a.command=='configure': print(p.home/'config.json');return
     if a.command=='doctor': p.doctor();print('Prerequisite checks passed');return
@@ -799,7 +807,10 @@ def main():
     if a.command=='status':
         print(json.dumps({'paused': p.is_paused(), 'last': load_private(p.state),
                           'publication': p.pending_publication(),
-                          'review': p.pending_review()}, indent=2))
+                          'review': p.pending_review(),
+                          'project': {'name': p.name, 'repository': p.cfg['repository'],
+                                      'branch': p.cfg['branch'], 'auto_push': p.cfg['auto_push'],
+                                      'checkout': str(p.repo)}}, indent=2))
         return
     if a.command=='history':print(read_private(p.history, 'No history'));return
     if a.command=='logs':
@@ -808,7 +819,7 @@ def main():
         with private_open(p.log) as stream:
             subprocess.run(['tail','-n','100',*(['-f'] if a.follow else [])],stdin=stream,check=True)
         return
-    if a.command in ('start','stop','restart'):
+    if a.command in ('start','restart'):
         subprocess.run(['systemctl','--user',a.command,f'devloop@{p.name}.service'],check=True);return
     signal.signal(signal.SIGTERM,stop_handler);signal.signal(signal.SIGINT,stop_handler)
     while not STOP:

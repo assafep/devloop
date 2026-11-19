@@ -17,6 +17,24 @@ devloop status jobstein
 
 By default the prototype preserves staged changes for manual review and pauses. It does not automatically publish. Review the dedicated checkout under ~/.local/state/devloop/jobstein/checkout. Do not enable auto_push before a successful controlled trial and security review. Pause the competing ChatGPT Jobstein automation before enabling local publication.
 
+## Linux and WSL setup
+
+Run setup as the Linux user who will operate DevLoop. On WSL, keep the DevLoop state and checkout on the Linux filesystem for owner-only permissions and file locking. Sign in with `codex login`, then check it with `codex login status`. If the browser callback is unavailable and your account permits device login, use `codex login --device-auth`. Sign in with `gh auth login --hostname github.com` as the same Linux user, then use `devloop doctor jobstein` after registering the project. Use an isolated account and credentials with only the access needed for review. [Codex CLI authentication](https://learn.chatgpt.com/docs/auth)
+
+Use `bash install.sh --no-service` for foreground operation. The standard installer copies the user service template under `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`) and requests a daemon reload. It replaces the executable and template atomically, leaving registered projects in place. The template starts with a fixed PATH that includes `~/.local/bin`. If Codex, GitHub CLI or Java depends on shell startup files, configure the service environment explicitly or use the foreground runner.
+
+For the first WSL trial, follow the quick start in a terminal with `auto_push=false`, then inspect the staged diff and review status. To smoke-test the service separately, pause the registered project before starting it and stop the service after checking that it is active. This requires a running systemd user manager. [Microsoft's WSL systemd guide](https://learn.microsoft.com/en-us/windows/wsl/systemd/)
+
+```sh
+devloop pause jobstein
+devloop start jobstein
+systemctl --user is-active devloop@jobstein.service
+devloop status jobstein
+devloop stop jobstein
+```
+
+`status` shows the configured repository, branch, checkout path and `auto_push` setting. `stop` can stop a named service even if its project configuration is unreadable. `bash uninstall.sh NAME` disables and stops the named instance, preserves project files and reports failures.
+
 ## Commands
 add NAME CONFIG; configure NAME (prints config path); doctor NAME; run-once NAME; run NAME; start/stop/restart NAME (systemd user service); pause/resume NAME; acknowledge NAME REVIEW_ID; status NAME; logs NAME [--follow]; history NAME.
 
