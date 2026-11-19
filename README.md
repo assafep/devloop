@@ -24,12 +24,16 @@ The Jobstein example uses 120 seconds between iterations and polls exact-commit 
 
 In review-only mode, DevLoop passes the verified base commit, CI result and run ID to Codex. Codex checks its local `HEAD` against that commit and uses the runner's result for the base CI gate.
 
+## Live review-only verification
+
+On 2026-11-19, DevLoop `0bd926e565e518710fcd342e99a707f25646a8a8` completed a controlled Jobstein `run-once` with real Codex and GitHub CLI. Codex used DevLoop's verified CI result for Jobstein `08e7cfbb336a37988238784e0e4b854220c03dac` without a second GitHub query. Gradle `test` and `installDist` passed in 20 seconds. DevLoop paused in `review` with only the synthetic fixture staged and `auto_push=false`. The trial checkout stayed at the verified base commit. [Jobstein CI run 44478426833](https://github.com/assafep/assaf-jobstein/actions/runs/44478426833)
+
 ## Safety and limitations
 Agent and configured build/test subprocesses receive only PATH, HOME, USER, LOGNAME, LANG, LC_ALL, LC_CTYPE, TMPDIR and TERM from the runner, plus GIT_TERMINAL_PROMPT=0. Agents also receive CODEX_HOME for user-controlled Codex setup. Unknown environment variables, publication tokens, SSH agent sockets, Git configuration overrides and runtime injection variables are excluded. Build commands needing additional configuration must use a reviewed, user-controlled setup; environment inheritance is deliberately restricted. Runner-side Git/GitHub operations retain their environment for publication.
 
 This filtering covers inherited environment variables only. HOME, CODEX_HOME, PATH executables, temporary directories and repository files can still expose credentials or execute code; Git credential helpers and configuration on disk remain accessible. It does not isolate processes from the runner's user account, filesystem or network. Use a separate account/container with restricted mounts and credentials before running untrusted code.
 
-This is an initial prototype, not a complete security boundary. Environment variable filtering and path allowlists do not prevent all credential exposure or malicious generated code; the local build command executes code. Keep auto_push disabled. Use isolated credentials and filesystem, never real applicant data. No live Codex or WSL service test has been completed. The installer does not start the service. The uninstall script only disables the named service and preserves state.
+This is an initial prototype, not a complete security boundary. Environment variable filtering and path allowlists do not prevent all credential exposure or malicious generated code; the local build command executes code. Keep auto_push disabled. Use isolated credentials and filesystem, never real applicant data. WSL service operation and unattended publication remain unverified. The installer does not start the service. The uninstall script only disables the named service and preserves state.
 
 Run offline tests: `python3 -m unittest discover -s tests -v`. See AGENTS.md and BACKLOG.md for continuation.
 The integration test requires Git and runs a complete review-only iteration with temporary repositories, local clone/fetch transport and synthetic Codex/gh executables. It checks environment filtering and staged-change preservation without live credentials or service calls. It does not validate real Codex sandbox enforcement or filesystem credential isolation.
